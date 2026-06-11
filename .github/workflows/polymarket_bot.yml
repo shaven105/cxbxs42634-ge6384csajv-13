@@ -1,0 +1,109 @@
+name: Polymarket Bot
+
+on:
+  schedule:
+    # Tier-1: every 10 minutes during active hours (08:00–22:00 UTC)
+    - cron: "*/10 8-22 * * *"
+    # Off-peak: every hour (22:00–08:00 UTC)
+    - cron: "0 22-23,0-7 * * *"
+    # Niche deep scan: 06:00, 12:00, 18:00 UTC
+    - cron: "0 6,12,18 * * *"
+    # Crypto: every 15 minutes 24/7
+    - cron: "*/15 * * * *"
+  workflow_dispatch:    # allow manual trigger from GitHub UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8  # hard kill before next 10-min window
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r polymarket_bot/requirements.txt -q
+
+      # Restore price cache from previous run
+      - name: Restore price cache
+        uses: actions/cache@v4
+        with:
+          path: polymarket_bot/price_cache.json
+          key: price-cache-${{ github.run_id }}
+          restore-keys: |
+            price-cache-
+
+      - name: Run bot scan
+        env:
+          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+          POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd polymarket_bot
+          python -c "
+          import os, logging
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+          from tier1_monitor import fetch_price_snapshot, detect_changed_markets
+          from scanner import filter_markets
+
+          # Detect what changed since last run
+          snapshot = fetch_price_snapshot()
+          changed = detect_changed_markets(snapshot)
+
+          if not changed:
+              print('No price changes detected — skipping Claude evaluation.')
+              exit(0)
+
+          print(f'{len(changed)} markets changed — starting Claude evaluation...')
+
+          from executor import build_clob_client
+          from tracker import Tracker
+          from valuator import estimate_fair_probability
+          from strategy import evaluate_market
+          from executor import place_limit_order
+          from datetime import datetime, timezone
+
+          clob = build_clob_client()
+          tracker = Tracker(clob)
+
+          if not tracker.is_alive():
+              print('Kill switch: balance at minimum. Exiting.')
+              exit(0)
+
+          bankroll = tracker.get_usdc_balance()
+          now = datetime.now(timezone.utc).isoformat()
+          tradeable = filter_markets(changed)
+          signals = orders = 0
+
+          for market in tradeable:
+              bankroll = tracker.get_usdc_balance()
+              if bankroll <= 0:
+                  break
+              fair = estimate_fair_probability(market, tracker)
+              if fair is None:
+                  continue
+              signal = evaluate_market(market, fair, bankroll)
+              if signal is None:
+                  continue
+              signals += 1
+              if place_limit_order(clob, signal, tracker, now):
+                  orders += 1
+
+          print(f'Done — signals={signals} orders={orders}')
+          print(tracker.summary())
+          "
+
+      # Save updated price cache for next run
+      - name: Save price cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: polymarket_bot/price_cache.json
+          key: price-cache-${{ github.run_id }}
