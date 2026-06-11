@@ -7,13 +7,17 @@ Flow:
   3. Run S5 NicheSpecialist strategy on today's markets → record new signals
   4. Send HTML email report
   5. Save updated state
+
+Estimator modes (set PAPER_ESTIMATOR env var):
+  "free"   (default) — bias-corrected mid-price heuristic, zero Claude cost
+  "claude"           — real Claude API calls (~$0.65–2/day)
 """
 
 import json
 import logging
 import os
+import random
 import smtplib
-import sys
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -28,7 +32,6 @@ logger = logging.getLogger("paper_trade")
 # ── Import bot modules ──────────────────────────────────────────────────────
 
 from scanner import fetch_active_markets, filter_markets
-from valuator import estimate_fair_probability
 from strategy import evaluate_market
 from tracker import Tracker
 from paper_trader import (
@@ -39,6 +42,48 @@ from reporter import build_html_report, build_subject
 
 NICHE_CATEGORIES = {"weather", "science", "entertainment"}
 REPORT_TO = "shaven52014@gmail.com"
+ESTIMATOR_MODE = os.environ.get("PAPER_ESTIMATOR", "free").lower()
+
+
+# ── Free heuristic estimator (zero Claude cost) ──────────────────────────────
+
+def _free_estimate(market: dict) -> float:
+    """
+    Bias-corrected mid-price estimator — no API cost.
+
+    Applies two known Polymarket biases:
+    1. Favorite-longshot: prices <25% are overpriced ~4%, prices >75% underpriced ~3%
+    2. Niche market noise: extra ±3% random correction (wider mispricings expected)
+
+    This won't be as accurate as Claude but is good enough to identify
+    directional signals for observation purposes.
+    """
+    bid = float(market.get("_best_bid") or market.get("bestBid") or 0)
+    ask = float(market.get("_best_ask") or market.get("bestAsk") or 0)
+    if bid <= 0 or ask <= 0:
+        return 0.5
+    mid = (bid + ask) / 2.0
+
+    # Longshot bias correction
+    if mid < 0.25:
+        mid = min(mid + 0.04 * (0.25 - mid) / 0.25, 0.95)
+    elif mid > 0.75:
+        mid = max(mid - 0.03 * (mid - 0.75) / 0.25, 0.05)
+
+    # Niche market extra noise (wider spread = more uncertainty)
+    spread = ask - bid
+    if spread > 0.06:
+        mid += random.gauss(0, spread * 0.3)
+
+    return max(0.04, min(0.96, mid))
+
+
+def get_fair_probability(market: dict, tracker) -> float | None:
+    """Route to free heuristic or real Claude depending on PAPER_ESTIMATOR."""
+    if ESTIMATOR_MODE == "claude":
+        from valuator import estimate_fair_probability
+        return estimate_fair_probability(market, tracker)
+    return _free_estimate(market)
 
 
 # ── Fake CLOB client for paper trading (no real orders) ─────────────────────
@@ -119,7 +164,10 @@ def main() -> None:
     # Step 3: Run S5 strategy on niche markets
     niche_raw = [m for m in raw_markets if m.get("category", "").lower() in NICHE_CATEGORIES]
     tradeable = filter_markets(niche_raw)
-    logger.info(f"S5 candidates: {len(niche_raw)} niche → {len(tradeable)} tradeable")
+    logger.info(
+        f"S5 candidates: {len(niche_raw)} niche → {len(tradeable)} tradeable "
+        f"[estimator={ESTIMATOR_MODE}]"
+    )
 
     bankroll = state["virtual_bankroll"]
     new_trades = []
@@ -129,7 +177,7 @@ def main() -> None:
             logger.warning("Virtual bankroll too low — stopping paper scan")
             break
 
-        fair = estimate_fair_probability(market, tracker)
+        fair = get_fair_probability(market, tracker)
         if fair is None:
             continue
 

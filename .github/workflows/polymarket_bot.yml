@@ -46,6 +46,9 @@ jobs:
 
       - name: Run paper trade + send report
         env:
+          # PAPER_ESTIMATOR=free  → zero Claude cost (default, observation phase)
+          # PAPER_ESTIMATOR=claude → real Claude API (when ready to validate quality)
+          PAPER_ESTIMATOR: free
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
