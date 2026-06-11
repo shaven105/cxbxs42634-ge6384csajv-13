@@ -1,16 +1,19 @@
 """
 Polymarket trading bot.
 
-Cycle every 10 minutes:
-  1. Kill-switch check (USDC balance)
-  2. Scan up to 1000 active markets (Gamma API)
-  3. Estimate fair probability with Claude claude-sonnet-4-6
-  4. Find mispricings > 8%
-  5. Size positions with half-Kelly (max 6% bankroll)
-  6. Execute GTC limit orders via CLOB API
-  7. Track Claude API costs vs trading P&L — if balance hits zero, stop.
+Usage:
+  python main.py              # smart scheduler mode (default, recommended)
+  python main.py --loop       # legacy 10-min fixed loop mode
+
+Scheduler mode runs tiered jobs:
+  - Tier-1 price monitor every 10 min (free, Gamma API only)
+  - Claude evaluation only when price changes >5% are detected
+  - Niche deep scan at 06:00 / 12:00 / 18:00 UTC
+  - Crypto scan every 15 min 24/7
+  - Sports scan every 30 min
 """
 
+import argparse
 import logging
 import logging.handlers
 import time
@@ -109,19 +112,8 @@ def run_cycle(clob_client, tracker: Tracker, cycle_num: int) -> None:
     )
 
 
-def main() -> None:
-    setup_logging()
-    logger.info("Polymarket bot starting.")
-
-    clob_client = build_clob_client()
-    tracker = Tracker(clob_client)
-
-    balance = tracker.get_usdc_balance()
-    logger.info(f"Initial balance: ${balance:.2f} USDC")
-    if balance <= 0:
-        logger.critical("No USDC balance. Exiting.")
-        return
-
+def _run_loop(clob_client, tracker: Tracker) -> None:
+    """Legacy fixed-interval loop (--loop flag)."""
     cycle = 0
     while True:
         cycle += 1
@@ -136,10 +128,54 @@ def main() -> None:
             return
         except Exception as exc:
             logger.error(f"Unhandled error in cycle #{cycle}: {exc}", exc_info=True)
-            time.sleep(30)  # cooldown before retry
+            time.sleep(30)
 
         logger.info(f"Sleeping {SCAN_INTERVAL_SECONDS}s until next cycle...")
         time.sleep(SCAN_INTERVAL_SECONDS)
+
+
+def _run_scheduler(clob_client, tracker: Tracker) -> None:
+    """Smart scheduler mode — tiered jobs, auto-scheduled."""
+    from scheduler import build_scheduler
+    sched = build_scheduler(clob_client, tracker)
+
+    logger.info("Scheduler starting. Jobs registered:")
+    for job in sched.get_jobs():
+        logger.info(f"  [{job.id}] {job.name} — next: {job.next_run_time}")
+
+    try:
+        sched.start()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Scheduler stopped — cancelling open orders.")
+        cancel_all_open_orders(clob_client)
+        sched.shutdown(wait=False)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Polymarket trading bot")
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Use legacy fixed 10-min loop instead of smart scheduler",
+    )
+    args = parser.parse_args()
+
+    setup_logging()
+    logger.info(f"Polymarket bot starting ({'loop' if args.loop else 'scheduler'} mode).")
+
+    clob_client = build_clob_client()
+    tracker = Tracker(clob_client)
+
+    balance = tracker.get_usdc_balance()
+    logger.info(f"Initial balance: ${balance:.2f} USDC")
+    if balance <= 0:
+        logger.critical("No USDC balance. Exiting.")
+        return
+
+    if args.loop:
+        _run_loop(clob_client, tracker)
+    else:
+        _run_scheduler(clob_client, tracker)
 
 
 if __name__ == "__main__":
