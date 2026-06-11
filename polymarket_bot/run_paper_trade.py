@@ -17,10 +17,7 @@ import json
 import logging
 import os
 import random
-import smtplib
 from datetime import datetime, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,10 +35,9 @@ from paper_trader import (
     load_state, save_state, check_resolutions,
     record_paper_trade, PaperTrade, STARTING_BANKROLL,
 )
-from reporter import build_html_report, build_subject
+from telegram_reporter import send_daily_report
 
 NICHE_CATEGORIES = {"weather", "science", "entertainment"}
-REPORT_TO = "shaven52014@gmail.com"
 ESTIMATOR_MODE = os.environ.get("PAPER_ESTIMATOR", "free").lower()
 
 
@@ -111,33 +107,6 @@ class PaperTracker(Tracker):
     def get_usdc_balance(self) -> float:
         self._cached_balance = self._state["virtual_bankroll"]
         return self._cached_balance
-
-
-# ── Email sender ─────────────────────────────────────────────────────────────
-
-def send_email(subject: str, html_body: str) -> None:
-    smtp_user = os.environ.get("GMAIL_USER")
-    smtp_pass = os.environ.get("GMAIL_APP_PASSWORD")
-
-    if not smtp_user or not smtp_pass:
-        logger.warning("GMAIL_USER / GMAIL_APP_PASSWORD not set — skipping email.")
-        logger.info("=== REPORT (stdout) ===")
-        logger.info(subject)
-        return
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = smtp_user
-    msg["To"] = REPORT_TO
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, REPORT_TO, msg.as_string())
-        logger.info(f"Email sent to {REPORT_TO}")
-    except Exception as exc:
-        logger.error(f"Email send failed: {exc}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -211,14 +180,12 @@ def main() -> None:
     state["last_run"] = today
     save_state(state)
 
-    # Step 5: Send report
-    html = build_html_report(
+    # Step 5: Send Telegram report
+    send_daily_report(
         state=state,
         new_trades=new_trades,
         newly_resolved=[t.__dict__ for t in newly_resolved],
     )
-    subject = build_subject(state)
-    send_email(subject, html)
 
 
 if __name__ == "__main__":
