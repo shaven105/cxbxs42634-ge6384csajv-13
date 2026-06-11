@@ -2,8 +2,8 @@ name: Polymarket Bot
 
 on:
   schedule:
-    # Paper trade daily report: 22:00 UTC+8 = 14:00 UTC
-    - cron: "0 14 * * *"
+    # Paper trade daily report: 22:25 UTC+8 = 14:25 UTC
+    - cron: "25 14 * * *"
     # Tier-1 price monitor: every 10 min, active hours (08-22 UTC)
     - cron: "*/10 8-22 * * *"
     # Off-peak monitor: every 60 min
@@ -23,7 +23,7 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' &&
-       startsWith(github.event.schedule, '0 14'))
+       startsWith(github.event.schedule, '25 14'))
 
     steps:
       - uses: actions/checkout@v4
@@ -46,10 +46,10 @@ jobs:
 
       - name: Run paper trade + send Telegram report
         env:
-          # PAPER_ESTIMATOR=free  → zero cost (default)
-          # PAPER_ESTIMATOR=claude → real Claude API
           PAPER_ESTIMATOR: free
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd polymarket_bot
           python run_paper_trade.py
@@ -69,7 +69,7 @@ jobs:
     # Skip the 09:00 UTC slot (that's paper report time)
     if: >
       github.event_name == 'schedule' &&
-      !startsWith(github.event.schedule, '0 14')
+      !startsWith(github.event.schedule, '25 14')
 
     steps:
       - uses: actions/checkout@v4
