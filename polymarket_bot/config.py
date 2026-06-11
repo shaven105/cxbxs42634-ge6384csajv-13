@@ -3,9 +3,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Wallet / chain
-PRIVATE_KEY: str = os.environ["POLYMARKET_PRIVATE_KEY"]
-FUNDER_ADDRESS: str = os.environ["POLYMARKET_FUNDER_ADDRESS"]
+# Wallet / chain (only required for live trading, not paper trading)
+PRIVATE_KEY: str = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
+FUNDER_ADDRESS: str = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "")
 CHAIN_ID: int = 137  # Polygon mainnet
 SIGNATURE_TYPE: int = 0  # 0 = EOA/MetaMask; 1 = Magic/email proxy wallet
 
