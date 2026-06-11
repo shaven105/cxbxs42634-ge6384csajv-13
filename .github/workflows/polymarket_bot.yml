@@ -2,27 +2,33 @@ name: Polymarket Bot
 
 on:
   schedule:
-    # Tier-1: every 10 minutes during active hours (08:00–22:00 UTC)
+    # Paper trade daily report: 09:00 UTC every day
+    - cron: "0 9 * * *"
+    # Tier-1 price monitor: every 10 min, active hours (08-22 UTC)
     - cron: "*/10 8-22 * * *"
-    # Off-peak: every hour (22:00–08:00 UTC)
+    # Off-peak monitor: every 60 min
     - cron: "0 22-23,0-7 * * *"
-    # Niche deep scan: 06:00, 12:00, 18:00 UTC
-    - cron: "0 6,12,18 * * *"
-    # Crypto: every 15 minutes 24/7
+    # Crypto: every 15 min 24/7
     - cron: "*/15 * * * *"
-  workflow_dispatch:    # allow manual trigger from GitHub UI
+  workflow_dispatch:   # manual trigger from GitHub UI
 
 jobs:
-  scan:
+
+  # ── Job 1: Daily paper trading report (sent to email) ─────────────────────
+  paper_trade_report:
+    name: "Paper Trade + Daily Email"
     runs-on: ubuntu-latest
-    timeout-minutes: 8  # hard kill before next 10-min window
+    timeout-minutes: 10
+    # Only run on the 09:00 UTC cron or manual dispatch
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' &&
+       startsWith(github.event.schedule, '0 9'))
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -30,7 +36,51 @@ jobs:
       - name: Install dependencies
         run: pip install -r polymarket_bot/requirements.txt -q
 
-      # Restore price cache from previous run
+      - name: Restore paper trade state
+        uses: actions/cache@v4
+        with:
+          path: polymarket_bot/paper_trades.json
+          key: paper-state-${{ github.run_id }}
+          restore-keys: |
+            paper-state-
+
+      - name: Run paper trade + send report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          cd polymarket_bot
+          python run_paper_trade.py
+
+      - name: Save paper trade state
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: polymarket_bot/paper_trades.json
+          key: paper-state-${{ github.run_id }}
+
+  # ── Job 2: Live scan (real trading, disabled until paper phase is done) ─────
+  live_scan:
+    name: "Live Market Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # Skip the 09:00 UTC slot (that's paper report time)
+    if: >
+      github.event_name == 'schedule' &&
+      !startsWith(github.event.schedule, '0 9')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r polymarket_bot/requirements.txt -q
+
       - name: Restore price cache
         uses: actions/cache@v4
         with:
@@ -39,7 +89,7 @@ jobs:
           restore-keys: |
             price-cache-
 
-      - name: Run bot scan
+      - name: Run Tier-1 price monitor
         env:
           POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
           POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
@@ -47,21 +97,20 @@ jobs:
         run: |
           cd polymarket_bot
           python -c "
-          import os, logging
+          import logging
           logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 
           from tier1_monitor import fetch_price_snapshot, detect_changed_markets
           from scanner import filter_markets
 
-          # Detect what changed since last run
           snapshot = fetch_price_snapshot()
           changed = detect_changed_markets(snapshot)
 
           if not changed:
-              print('No price changes detected — skipping Claude evaluation.')
+              print('No price changes — skipping Claude.')
               exit(0)
 
-          print(f'{len(changed)} markets changed — starting Claude evaluation...')
+          print(f'{len(changed)} markets changed — evaluating...')
 
           from executor import build_clob_client
           from tracker import Tracker
@@ -74,7 +123,7 @@ jobs:
           tracker = Tracker(clob)
 
           if not tracker.is_alive():
-              print('Kill switch: balance at minimum. Exiting.')
+              print('Kill switch triggered. Exiting.')
               exit(0)
 
           bankroll = tracker.get_usdc_balance()
@@ -96,11 +145,9 @@ jobs:
               if place_limit_order(clob, signal, tracker, now):
                   orders += 1
 
-          print(f'Done — signals={signals} orders={orders}')
-          print(tracker.summary())
+          print(f'Done — signals={signals} orders={orders} | {tracker.summary()}')
           "
 
-      # Save updated price cache for next run
       - name: Save price cache
         if: always()
         uses: actions/cache@v4
