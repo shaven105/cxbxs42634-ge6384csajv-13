@@ -46,10 +46,10 @@ jobs:
 
       - name: Run paper trade + send Telegram report
         env:
-          # PAPER_ESTIMATOR=free  → zero cost (default)
-          # PAPER_ESTIMATOR=claude → real Claude API
           PAPER_ESTIMATOR: free
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd polymarket_bot
           python run_paper_trade.py

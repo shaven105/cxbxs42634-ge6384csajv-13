@@ -1,19 +1,34 @@
 """
 Telegram report sender for paper trading daily summary.
 Uses Telegram Bot API sendMessage with MarkdownV2 formatting.
+
+Requires env vars:
+  TELEGRAM_BOT_TOKEN  — from @BotFather
+  TELEGRAM_CHAT_ID    — your personal chat ID
 """
 
 import logging
 import urllib.request
 import urllib.parse
 import json
+import os
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8618325313:AAFo0681Yy5CV2XPygsZShrpjSd31L0BBTM"
-CHAT_ID = "8798947532"
-API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+def _get_api_base() -> str:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable not set")
+    return f"https://api.telegram.org/bot{token}"
+
+
+def _get_chat_id() -> str:
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        raise RuntimeError("TELEGRAM_CHAT_ID environment variable not set")
+    return chat_id
 
 
 def _esc(text: str) -> str:
@@ -38,9 +53,9 @@ def _fmt_pnl(val) -> str:
 
 def send_message(text: str) -> bool:
     """Send a MarkdownV2 message via Telegram Bot API."""
-    url = f"{API_BASE}/sendMessage"
+    url = f"{_get_api_base()}/sendMessage"
     payload = json.dumps({
-        "chat_id": CHAT_ID,
+        "chat_id": _get_chat_id(),
         "text": text,
         "parse_mode": "MarkdownV2",
         "disable_web_page_preview": True,
