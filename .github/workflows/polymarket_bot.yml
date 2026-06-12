@@ -4,12 +4,6 @@ on:
   schedule:
     # Paper trade daily report: 23:00 UTC+8 = 15:00 UTC
     - cron: "0 15 * * *"
-    # Tier-1 price monitor: every 10 min, active hours (08-22 UTC)
-    - cron: "*/10 8-22 * * *"
-    # Off-peak monitor: every 60 min
-    - cron: "0 22-23,0-7 * * *"
-    # Crypto: every 15 min 24/7
-    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
@@ -66,115 +60,38 @@ jobs:
           path: polymarket_bot/paper_trades.json
           key: paper-state-${{ github.run_id }}
 
-  # ── Job 2: Live scan (real trading, skips when no private key configured) ────
-  live_scan:
-    name: "Live Market Scan"
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    # Skip the 15:00 UTC slot (that's daily report time); never run on manual dispatch
-    if: >
-      github.event_name == 'schedule' &&
-      !startsWith(github.event.schedule, '0 15')
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r polymarket_bot/requirements.txt -q
-
-      - name: Restore price cache
-        uses: actions/cache@v4
-        with:
-          path: polymarket_bot/price_cache.json
-          key: price-cache-${{ github.run_id }}
-          restore-keys: |
-            price-cache-
-
-      - name: Run Tier-1 price monitor
-        env:
-          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
-          POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          cd polymarket_bot
-          python -c "
-          import logging, os
-          logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-
-          if not os.environ.get('POLYMARKET_PRIVATE_KEY'):
-              print('No POLYMARKET_PRIVATE_KEY configured — paper trading mode, skipping live scan.')
-              exit(0)
-
-          from tier1_monitor import fetch_price_snapshot, detect_changed_markets
-          from scanner import filter_markets
-
-          snapshot = fetch_price_snapshot()
-          changed = detect_changed_markets(snapshot)
-
-          if not changed:
-              print('No price changes — skipping.')
-              exit(0)
-
-          print(f'{len(changed)} markets changed — evaluating...')
-
-          from executor import build_clob_client
-          from tracker import Tracker
-          from valuator import estimate_fair_probability
-          from strategy import evaluate_market
-          from executor import place_limit_order
-          from datetime import datetime, timezone
-
-          clob = build_clob_client()
-          tracker = Tracker(clob)
-
-          if not tracker.is_alive():
-              print('Kill switch triggered. Exiting.')
-              exit(0)
-
-          bankroll = tracker.get_usdc_balance()
-          now = datetime.now(timezone.utc).isoformat()
-          tradeable = filter_markets(changed)
-          signals = orders = 0
-
-          for market in tradeable:
-              bankroll = tracker.get_usdc_balance()
-              if bankroll <= 0:
-                  break
-              fair = estimate_fair_probability(market, tracker)
-              if fair is None:
-                  continue
-              signal = evaluate_market(market, fair, bankroll)
-              if signal is None:
-                  continue
-              signals += 1
-              if place_limit_order(clob, signal, tracker, now):
-                  orders += 1
-
-          summary = tracker.summary()
-          print(f'Done — signals={signals} orders={orders} | {summary}')
-
-          if orders > 0:
-              from telegram_reporter import send_message
-              ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-              msg = (
-                  f'*🔔 Polymarket 實盤成交通知*\n'
-                  f'_{ts}_\n\n'
-                  f'已下單 *{orders}* 筆\\|信號 {signals} 筆\n'
-                  f'{summary}'
-              )
-              send_message(msg)
-          "
-
-      - name: Save price cache
-        if: always()
-        uses: actions/cache@v4
-        with:
-          path: polymarket_bot/price_cache.json
-          key: price-cache-${{ github.run_id }}
+  # ── Job 2: Live scan — only added back when POLYMARKET_PRIVATE_KEY is ready ──
+  # Uncomment the schedule block below and set POLYMARKET_PRIVATE_KEY in Secrets
+  # to enable live trading.
+  #
+  # live_scan:
+  #   name: "Live Market Scan"
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 8
+  #   if: github.event_name == 'schedule'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.11"
+  #         cache: pip
+  #     - run: pip install -r polymarket_bot/requirements.txt -q
+  #     - uses: actions/cache@v4
+  #       with:
+  #         path: polymarket_bot/price_cache.json
+  #         key: price-cache-${{ github.run_id }}
+  #         restore-keys: price-cache-
+  #     - name: Run Tier-1 price monitor
+  #       env:
+  #         POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+  #         POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
+  #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  #         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  #         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  #       run: |
+  #         cd polymarket_bot && python -c "..."
+  #     - uses: actions/cache@v4
+  #       if: always()
+  #       with:
+  #         path: polymarket_bot/price_cache.json
+  #         key: price-cache-${{ github.run_id }}
