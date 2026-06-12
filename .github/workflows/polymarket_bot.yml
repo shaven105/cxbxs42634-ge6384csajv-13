@@ -4,8 +4,8 @@ on:
   schedule:
     # Daily paper trade report: 23:00 UTC+8 = 15:00 UTC
     - cron: "0 15 * * *"
-    # Intraday S5 niche scan: every 15 min 24/7
-    - cron: "*/15 * * * *"
+    # Intraday S5 niche scan: every ~23 min (0,23,46 of each hour)
+    - cron: "*/23 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
