@@ -10,18 +10,23 @@ on:
     - cron: "0 22-23,0-7 * * *"
     # Crypto: every 15 min 24/7
     - cron: "*/15 * * * *"
-  workflow_dispatch:   # manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      force_report:
+        description: "Force send daily report (yes/no)"
+        required: false
+        default: "no"
 
 jobs:
 
-  # ── Job 1: Daily paper trading report (sent to email) ─────────────────────
+  # ── Job 1: Daily paper trading report (23:00 Taiwan time = 15:00 UTC) ────────
   paper_trade_report:
-    name: "Paper Trade + Daily Email"
+    name: "Paper Trade + Daily Report"
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Only run on the 09:00 UTC cron or manual dispatch
+    # Only run on the 15:00 UTC daily cron, OR manual dispatch with force_report=yes
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.force_report == 'yes') ||
       (github.event_name == 'schedule' &&
        startsWith(github.event.schedule, '0 15'))
 
@@ -61,12 +66,12 @@ jobs:
           path: polymarket_bot/paper_trades.json
           key: paper-state-${{ github.run_id }}
 
-  # ── Job 2: Live scan (real trading, disabled until paper phase is done) ─────
+  # ── Job 2: Live scan (real trading, skips when no private key configured) ────
   live_scan:
     name: "Live Market Scan"
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    # Skip the 09:00 UTC slot (that's paper report time)
+    # Skip the 15:00 UTC slot (that's daily report time); never run on manual dispatch
     if: >
       github.event_name == 'schedule' &&
       !startsWith(github.event.schedule, '0 15')
@@ -95,6 +100,8 @@ jobs:
           POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
           POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd polymarket_bot
           python -c "
@@ -112,7 +119,7 @@ jobs:
           changed = detect_changed_markets(snapshot)
 
           if not changed:
-              print('No price changes — skipping Claude.')
+              print('No price changes — skipping.')
               exit(0)
 
           print(f'{len(changed)} markets changed — evaluating...')
@@ -150,7 +157,19 @@ jobs:
               if place_limit_order(clob, signal, tracker, now):
                   orders += 1
 
-          print(f'Done — signals={signals} orders={orders} | {tracker.summary()}')
+          summary = tracker.summary()
+          print(f'Done — signals={signals} orders={orders} | {summary}')
+
+          if orders > 0:
+              from telegram_reporter import send_message
+              ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+              msg = (
+                  f'*🔔 Polymarket 實盤成交通知*\n'
+                  f'_{ts}_\n\n'
+                  f'已下單 *{orders}* 筆\\|信號 {signals} 筆\n'
+                  f'{summary}'
+              )
+              send_message(msg)
           "
 
       - name: Save price cache
