@@ -33,12 +33,14 @@ from strategy import evaluate_market
 from tracker import Tracker
 from paper_trader import (
     load_state, save_state, check_resolutions,
-    record_paper_trade, PaperTrade, STARTING_BANKROLL,
+    record_paper_trade, is_already_open, PaperTrade, STARTING_BANKROLL,
 )
-from telegram_reporter import send_daily_report
+from telegram_reporter import send_daily_report, send_signal_alert
 
 NICHE_CATEGORIES = {"weather", "science", "entertainment"}
 ESTIMATOR_MODE = os.environ.get("PAPER_ESTIMATOR", "free").lower()
+# SEND_DAILY_REPORT=false → intraday scan mode (no full report, only signal alerts)
+SEND_DAILY_REPORT = os.environ.get("SEND_DAILY_REPORT", "true").lower() == "true"
 
 
 # ── Free heuristic estimator (zero Claude cost) ──────────────────────────────
@@ -112,7 +114,8 @@ class PaperTracker(Tracker):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    logger.info("=== Paper trading daily run ===")
+    mode = "daily report" if SEND_DAILY_REPORT else "intraday scan"
+    logger.info(f"=== Paper trading run [{mode}] ===")
     state = load_state()
     tracker = PaperTracker(state)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -154,6 +157,9 @@ def main() -> None:
         if signal is None:
             continue
 
+        if is_already_open(state, signal.market_id):
+            continue  # already have a position on this market
+
         trade = PaperTrade(
             date=today,
             market_id=signal.market_id,
@@ -180,12 +186,15 @@ def main() -> None:
     state["last_run"] = today
     save_state(state)
 
-    # Step 5: Send Telegram report
-    send_daily_report(
-        state=state,
-        new_trades=new_trades,
-        newly_resolved=[t.__dict__ for t in newly_resolved],
-    )
+    # Step 5: Notify via Telegram
+    if SEND_DAILY_REPORT:
+        send_daily_report(
+            state=state,
+            new_trades=new_trades,
+            newly_resolved=[t.__dict__ for t in newly_resolved],
+        )
+    elif new_trades:
+        send_signal_alert(new_trades=new_trades, state=state)
 
 
 if __name__ == "__main__":
