@@ -98,8 +98,12 @@ jobs:
         run: |
           cd polymarket_bot
           python -c "
-          import logging
+          import logging, os
           logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+          if not os.environ.get('POLYMARKET_PRIVATE_KEY'):
+              print('No POLYMARKET_PRIVATE_KEY configured — paper trading mode, skipping live scan.')
+              exit(0)
 
           from tier1_monitor import fetch_price_snapshot, detect_changed_markets
           from scanner import filter_markets
