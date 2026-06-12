@@ -121,6 +121,14 @@ def check_resolutions(state: dict, markets_by_id: dict) -> list[PaperTrade]:
     return newly_resolved
 
 
+def is_already_open(state: dict, market_id: str) -> bool:
+    """Return True if there is already an unresolved trade for this market."""
+    return any(
+        t["market_id"] == market_id and not t.get("resolved")
+        for t in state["trades"]
+    )
+
+
 def record_paper_trade(state: dict, trade: PaperTrade) -> None:
     state["virtual_bankroll"] -= trade.bet_usdc  # reserve bet amount
     state["trades"].append(asdict(trade))

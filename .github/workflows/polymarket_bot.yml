@@ -2,8 +2,10 @@ name: Polymarket Bot
 
 on:
   schedule:
-    # Paper trade daily report: 23:00 UTC+8 = 15:00 UTC
+    # Daily paper trade report: 23:00 UTC+8 = 15:00 UTC
     - cron: "0 15 * * *"
+    # Intraday S5 niche scan: every 15 min 24/7
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
@@ -18,7 +20,6 @@ jobs:
     name: "Paper Trade + Daily Report"
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Only run on the 15:00 UTC daily cron, OR manual dispatch with force_report=yes
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.force_report == 'yes') ||
       (github.event_name == 'schedule' &&
@@ -43,9 +44,10 @@ jobs:
           restore-keys: |
             paper-state-
 
-      - name: Run paper trade + send Telegram report
+      - name: Run paper trade + send Telegram daily report
         env:
           PAPER_ESTIMATOR: free
+          SEND_DAILY_REPORT: "true"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -60,38 +62,63 @@ jobs:
           path: polymarket_bot/paper_trades.json
           key: paper-state-${{ github.run_id }}
 
-  # ── Job 2: Live scan — only added back when POLYMARKET_PRIVATE_KEY is ready ──
-  # Uncomment the schedule block below and set POLYMARKET_PRIVATE_KEY in Secrets
-  # to enable live trading.
+  # ── Job 2: Intraday S5 niche scan every 15 min ───────────────────────────────
+  paper_scan:
+    name: "Intraday Paper Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # Skip the 15:00 UTC slot — daily report job handles that run
+    if: >
+      github.event_name == 'schedule' &&
+      !startsWith(github.event.schedule, '0 15')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r polymarket_bot/requirements.txt -q
+
+      - name: Restore paper trade state
+        uses: actions/cache@v4
+        with:
+          path: polymarket_bot/paper_trades.json
+          key: paper-state-${{ github.run_id }}
+          restore-keys: |
+            paper-state-
+
+      - name: Scan niche markets + alert on new signals
+        env:
+          PAPER_ESTIMATOR: free
+          SEND_DAILY_REPORT: "false"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          cd polymarket_bot
+          python run_paper_trade.py
+
+      - name: Save paper trade state
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: polymarket_bot/paper_trades.json
+          key: paper-state-${{ github.run_id }}
+
+  # ── Job 3: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
+  # Add these crons to the schedule trigger above:
+  #   - cron: "*/10 8-22 * * *"   # every 10 min active hours
+  #   - cron: "0 22-23,0-7 * * *" # every hour off-peak
   #
   # live_scan:
   #   name: "Live Market Scan"
   #   runs-on: ubuntu-latest
   #   timeout-minutes: 8
-  #   if: github.event_name == 'schedule'
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: "3.11"
-  #         cache: pip
-  #     - run: pip install -r polymarket_bot/requirements.txt -q
-  #     - uses: actions/cache@v4
-  #       with:
-  #         path: polymarket_bot/price_cache.json
-  #         key: price-cache-${{ github.run_id }}
-  #         restore-keys: price-cache-
-  #     - name: Run Tier-1 price monitor
-  #       env:
-  #         POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
-  #         POLYMARKET_FUNDER_ADDRESS: ${{ secrets.POLYMARKET_FUNDER_ADDRESS }}
-  #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-  #         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-  #         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-  #       run: |
-  #         cd polymarket_bot && python -c "..."
-  #     - uses: actions/cache@v4
-  #       if: always()
-  #       with:
-  #         path: polymarket_bot/price_cache.json
-  #         key: price-cache-${{ github.run_id }}
+  #   if: >
+  #     github.event_name == 'schedule' &&
+  #     !startsWith(github.event.schedule, '0 15')
+  #   steps: ...

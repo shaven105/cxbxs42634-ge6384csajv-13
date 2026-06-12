@@ -148,3 +148,28 @@ def build_daily_report(state: dict, new_trades: list, newly_resolved: list) -> s
 def send_daily_report(state: dict, new_trades: list, newly_resolved: list) -> None:
     msg = build_daily_report(state, new_trades, newly_resolved)
     send_message(msg)
+
+
+def send_signal_alert(new_trades: list, state: dict) -> None:
+    """Brief Telegram alert when intraday scan finds new signals."""
+    bankroll = state["virtual_bankroll"]
+    now = datetime.now(timezone.utc).strftime("%Y\\-%m\\-%d %H:%M UTC")
+    lines = [
+        f"*🆕 模擬新信號 \\({len(new_trades)} 筆\\)*",
+        f"_{now}_",
+        "",
+    ]
+    for t in new_trades[:5]:
+        q = _esc(t.get("question", "")[:45])
+        side = t.get("side", "")
+        price = t.get("price", 0)
+        edge = t.get("edge", 0)
+        bet = t.get("bet_usdc", 0)
+        lines.append(
+            f"• `{side}` @ `{price:.3f}` \\| edge `{edge:.1%}` \\| `${bet:.2f}`\n"
+            f"  _{q}_"
+        )
+    if len(new_trades) > 5:
+        lines.append(f"_\\.\\.\\. 還有 {len(new_trades)-5} 筆_")
+    lines.append(f"\n💰 虛擬餘額　`${bankroll:.2f}`")
+    send_message("\n".join(lines))
