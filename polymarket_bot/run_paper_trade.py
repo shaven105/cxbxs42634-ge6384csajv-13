@@ -45,15 +45,16 @@ SEND_DAILY_REPORT = os.environ.get("SEND_DAILY_REPORT", "true").lower() == "true
 # ── Legal exclusion: Taiwan politics / elections ──────────────────────────────
 # Blocked for legal compliance — do not trade on these markets.
 _TW_BLOCKED_KEYWORDS = {
-    "taiwan", "taiwanese", "taipei",
-    "roc", "republic of china",
+    # Political parties
     "dpp", "democratic progressive party",
     "kmt", "kuomintang", "nationalist party",
-    "tsai", "tsai ing-wen",
+    # Political figures
+    "tsai ing-wen",
     "lai ching-te", "william lai", "賴清德",
     "han kuo-yu", "韓國瑜",
     "hou yu-ih", "侯友宜",
     "ko wen-je", "柯文哲",
+    # Election / politics topics
     "taiwan election", "taiwan president",
     "taiwan legislative", "taiwan referendum",
     "taiwan politics", "taiwan independence",
