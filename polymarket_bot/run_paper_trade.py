@@ -42,6 +42,37 @@ ESTIMATOR_MODE = os.environ.get("PAPER_ESTIMATOR", "free").lower()
 # SEND_DAILY_REPORT=false → intraday scan mode (no full report, only signal alerts)
 SEND_DAILY_REPORT = os.environ.get("SEND_DAILY_REPORT", "true").lower() == "true"
 
+# ── Legal exclusion: Taiwan politics / elections ──────────────────────────────
+# Blocked for legal compliance — do not trade on these markets.
+_TW_BLOCKED_KEYWORDS = {
+    "taiwan", "taiwanese", "taipei",
+    "roc", "republic of china",
+    "dpp", "democratic progressive party",
+    "kmt", "kuomintang", "nationalist party",
+    "tsai", "tsai ing-wen",
+    "lai ching-te", "william lai", "賴清德",
+    "han kuo-yu", "韓國瑜",
+    "hou yu-ih", "侯友宜",
+    "ko wen-je", "柯文哲",
+    "taiwan election", "taiwan president",
+    "taiwan legislative", "taiwan referendum",
+    "taiwan politics", "taiwan independence",
+    "cross-strait", "cross strait",
+    "taiwan strait",
+}
+
+
+def _is_blocked(market: dict) -> bool:
+    """Return True if the market touches Taiwan politics/elections."""
+    text = " ".join([
+        (market.get("question") or ""),
+        (market.get("description") or ""),
+        (market.get("groupSlug") or ""),
+        (market.get("category") or ""),
+        (market.get("tags") or ""),
+    ]).lower()
+    return any(kw in text for kw in _TW_BLOCKED_KEYWORDS)
+
 
 # ── Free heuristic estimator (zero Claude cost) ──────────────────────────────
 
@@ -134,8 +165,14 @@ def main() -> None:
             logger.info(f"  [{result}] {t.question[:50]} | P&L: {t.pnl_usdc:+.2f}")
 
     # Step 3: Run S5 strategy on niche markets
+    # Legal filter: remove Taiwan politics/elections first
+    blocked = [m for m in raw_markets if _is_blocked(m)]
+    if blocked:
+        logger.info(f"Blocked {len(blocked)} Taiwan politics/election markets")
+    raw_markets_clean = [m for m in raw_markets if not _is_blocked(m)]
+
     # Log actual categories returned by Gamma API (helps debug mismatches)
-    all_cats = {m.get("category", "") or "" for m in raw_markets}
+    all_cats = {m.get("category", "") or "" for m in raw_markets_clean}
     logger.info(f"Gamma API categories in batch: {sorted(all_cats)}")
 
     # Primary: category field match; fallback: keyword in question text
@@ -152,7 +189,7 @@ def main() -> None:
         question = (m.get("question") or m.get("groupSlug") or "").lower()
         return any(kw in question for kw in NICHE_KEYWORDS)
 
-    niche_raw = [m for m in raw_markets if is_niche(m)]
+    niche_raw = [m for m in raw_markets_clean if is_niche(m)]
     tradeable = filter_markets(niche_raw)
     logger.info(
         f"S5 candidates: {len(niche_raw)} niche → {len(tradeable)} tradeable "
