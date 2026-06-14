@@ -31,10 +31,10 @@ MIN_BEST_BID: float = 0.03             # skip near-certainties
 MAX_BEST_ASK: float = 0.97
 
 # Strategy
-MISPRICING_THRESHOLD: float = 0.08    # 8% minimum edge to trade
+MISPRICING_THRESHOLD: float = 0.03    # 3% minimum edge (free heuristic; raise to 8% for live Claude mode)
 HALF_KELLY_FRACTION: float = 0.5
 MAX_BET_FRACTION: float = 0.06        # hard cap: 6% of bankroll per trade
-MIN_BET_USDC: float = 15.0            # CLOB minimum order size
+MIN_BET_USDC: float = 0.10            # paper trading min; CLOB live minimum is $15
 
 # Kill switch
 MIN_USDC_BALANCE: float = 0.0
