@@ -165,37 +165,23 @@ def main() -> None:
             result = "WIN" if t.outcome else "LOSS"
             logger.info(f"  [{result}] {t.question[:50]} | P&L: {t.pnl_usdc:+.2f}")
 
-    # Step 3: Run S5 strategy on niche markets
+    # Step 3: Apply legal filter then scan all markets for edge
     # Legal filter: remove Taiwan politics/elections first
     blocked = [m for m in raw_markets if _is_blocked(m)]
     if blocked:
         logger.info(f"Blocked {len(blocked)} Taiwan politics/election markets")
     raw_markets_clean = [m for m in raw_markets if not _is_blocked(m)]
 
-    # Log actual categories returned by Gamma API (helps debug mismatches)
-    all_cats = {m.get("category", "") or "" for m in raw_markets_clean}
-    logger.info(f"Gamma API categories in batch: {sorted(all_cats)}")
-
-    # Primary: category field match; fallback: keyword in question text
-    NICHE_KEYWORDS = {"weather", "science", "entertainment", "pop culture",
-                      "nature", "climate", "space", "award", "movie", "music",
-                      "celebrity", "tv", "film", "show"}
-
-    def is_niche(m: dict) -> bool:
-        cat = (m.get("category") or "").lower()
-        if cat in NICHE_CATEGORIES:
-            return True
-        if any(kw in cat for kw in NICHE_KEYWORDS):
-            return True
-        question = (m.get("question") or m.get("groupSlug") or "").lower()
-        return any(kw in question for kw in NICHE_KEYWORDS)
-
-    niche_raw = [m for m in raw_markets_clean if is_niche(m)]
-    tradeable = filter_markets(niche_raw)
+    # Apply quality filter (liquidity/spread/binary) to all remaining markets.
+    # Gamma API returns empty category strings, so niche pre-filtering is dropped —
+    # the edge threshold in evaluate_market naturally selects mispriced markets.
+    tradeable = filter_markets(raw_markets_clean)
     logger.info(
-        f"S5 candidates: {len(niche_raw)} niche → {len(tradeable)} tradeable "
+        f"S5 candidates: {len(raw_markets_clean)} total → {len(tradeable)} tradeable "
         f"[estimator={ESTIMATOR_MODE}]"
     )
+
+    niche_raw = tradeable  # kept for compatibility with downstream logging
 
     bankroll = state["virtual_bankroll"]
     new_trades = []
