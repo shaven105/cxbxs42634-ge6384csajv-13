@@ -4,12 +4,18 @@ on:
   schedule:
     # Daily paper trade report: 23:00 UTC+8 = 15:00 UTC
     - cron: "0 15 * * *"
+    # Daily strategy review: 08:30 Taiwan = 00:30 UTC
+    - cron: "30 0 * * *"
     # Intraday S5 niche scan: every 30 min
     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
         description: "Force send daily report (yes/no)"
+        required: false
+        default: "no"
+      force_review:
+        description: "Force strategy review (yes/no)"
         required: false
         default: "no"
 
@@ -71,10 +77,11 @@ jobs:
     name: "Intraday Paper Scan"
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    # Skip the 15:00 UTC slot — daily report job handles that run
+    # Skip 15:00 UTC (daily report) and 00:30 UTC (strategy review) slots
     if: >
       github.event_name == 'schedule' &&
-      !startsWith(github.event.schedule, '0 15')
+      !startsWith(github.event.schedule, '0 15') &&
+      !startsWith(github.event.schedule, '30 0')
 
     steps:
       - uses: actions/checkout@v4
@@ -117,7 +124,49 @@ jobs:
             polymarket_bot/grid_trades.json
           key: paper-state-${{ github.run_id }}
 
-  # ── Job 3: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
+  # ── Job 3: Daily strategy review (00:30 UTC = 08:30 Taiwan) ─────────────────
+  strategy_review:
+    name: "Daily Strategy Review"
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.force_review == 'yes') ||
+      (github.event_name == 'schedule' &&
+       startsWith(github.event.schedule, '30 0'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r polymarket_bot/requirements.txt -q
+
+      - name: Restore trade state
+        uses: actions/cache@v4
+        with:
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
+          key: paper-state-${{ github.run_id }}
+          restore-keys: |
+            paper-state-
+
+      - name: Run strategy review
+        env:
+          # Set REVIEWER_USE_CLAUDE=true to get AI analysis (uses Claude API)
+          REVIEWER_USE_CLAUDE: "false"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          cd polymarket_bot
+          python reviewer.py
+
+  # ── Job 4: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
   # Add these crons to the schedule trigger above:
   #   - cron: "*/10 8-22 * * *"   # every 10 min active hours
   #   - cron: "0 22-23,0-7 * * *" # every hour off-peak
