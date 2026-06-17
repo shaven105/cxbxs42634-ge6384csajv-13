@@ -39,7 +39,9 @@ jobs:
       - name: Restore paper trade state
         uses: actions/cache@v4
         with:
-          path: polymarket_bot/paper_trades.json
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
@@ -59,7 +61,9 @@ jobs:
         if: always()
         uses: actions/cache@v4
         with:
-          path: polymarket_bot/paper_trades.json
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
           key: paper-state-${{ github.run_id }}
 
   # ── Job 2: Intraday S5 niche scan every 15 min ───────────────────────────────
@@ -86,7 +90,9 @@ jobs:
       - name: Restore paper trade state
         uses: actions/cache@v4
         with:
-          path: polymarket_bot/paper_trades.json
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
@@ -106,7 +112,9 @@ jobs:
         if: always()
         uses: actions/cache@v4
         with:
-          path: polymarket_bot/paper_trades.json
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
           key: paper-state-${{ github.run_id }}
 
   # ── Job 3: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
