@@ -164,6 +164,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Auto-PR: opens a GitHub PR when better parameters are found
           REVIEWER_AUTO_PR: "true"
+          # AUTO_MERGE switch: set via GitHub Settings → Variables → Actions
+          # true = auto-merge the param PR; false = open PR for manual review
+          REVIEWER_AUTO_MERGE: ${{ vars.AUTO_MERGE_PARAM_PR || 'false' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |

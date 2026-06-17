@@ -39,6 +39,7 @@ USE_CLAUDE = (
 # Auto-PR: when True, reviewer pushes a branch and opens a GitHub PR
 # with updated config when better parameters are found
 AUTO_PR = os.environ.get("REVIEWER_AUTO_PR", "true").lower() == "true"
+AUTO_MERGE = os.environ.get("REVIEWER_AUTO_MERGE", "false").lower() == "true"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "")  # e.g. shaven105/test1
 MIN_RESOLVED_FOR_SWEEP = 5  # need at least N resolved trades to trust the sweep
@@ -360,7 +361,23 @@ given current market conditions.
             "body": pr_body,
         })
         pr_url = pr.get("html_url", "")
+        pr_number = pr.get("number")
         logger.info(f"Auto-PR opened: {pr_url}")
+
+        if AUTO_MERGE and pr_number:
+            logger.info("AUTO_MERGE=true — merging PR immediately")
+            try:
+                gh("PUT", f"/pulls/{pr_number}/merge", {
+                    "commit_title": f"[Auto-merge] Parameter tune {date_str}",
+                    "commit_message": "\n".join(
+                        f"{key}: {old} → {new}" for (_, key, old, new) in changes
+                    ),
+                    "merge_method": "squash",
+                })
+                logger.info("Auto-merge complete")
+            except Exception as merge_exc:
+                logger.warning(f"Auto-merge failed (PR still open): {merge_exc}")
+
         return True
 
     except Exception as exc:
@@ -499,7 +516,10 @@ def build_review_report(
             lines.append(_esc(line) if line.strip() else "")
 
     if pr_opened:
-        lines += ["", f"{'─' * 28}", "*🔀 已自動開 PR 建議更新參數*", "_請至 GitHub 審核後 merge_"]
+        if AUTO_MERGE:
+            lines += ["", f"{'─' * 28}", "*✅ 已自動調參並 merge*", "_AUTO\\_MERGE=true — 參數已更新_"]
+        else:
+            lines += ["", f"{'─' * 28}", "*🔀 已開 PR 建議更新參數*", "_請至 GitHub 審核後 merge_"]
     elif s5_m.n_resolved + grid_m.n_resolved < MIN_RESOLVED_FOR_SWEEP:
         remaining = MIN_RESOLVED_FOR_SWEEP - s5_m.n_resolved - grid_m.n_resolved
         lines.append(f"\n_需再累積 {remaining} 筆已結算交易才開始自動調參_")
