@@ -157,8 +157,7 @@ jobs:
 
       - name: Run strategy review
         env:
-          # Set REVIEWER_USE_CLAUDE=true to get AI analysis (uses Claude API)
-          REVIEWER_USE_CLAUDE: "false"
+          REVIEWER_USE_CLAUDE: "true"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
