@@ -35,6 +35,10 @@ from paper_trader import (
     load_state, save_state, check_resolutions,
     record_paper_trade, is_already_open, PaperTrade, STARTING_BANKROLL,
 )
+from strategy_grid import (
+    load_grid_state, save_grid_state, is_grid_candidate,
+    is_already_gridded, open_grid, record_grid_trade, check_grid_updates,
+)
 from telegram_reporter import send_daily_report, send_signal_alert
 
 NICHE_CATEGORIES = {"weather", "science", "entertainment"}
@@ -219,24 +223,56 @@ def main() -> None:
         bankroll = state["virtual_bankroll"]
 
     logger.info(
-        f"Today: {len(new_trades)} new signals | "
+        f"S5: {len(new_trades)} new signals | "
         f"Balance: ${state['virtual_bankroll']:.2f} | "
         f"Claude cost: ${state['total_claude_cost_usd']:.4f}"
     )
 
-    # Step 4: Save state
+    # Step 4: S2 Grid strategy scan
+    grid_state = load_grid_state()
+    grid_bankroll = [state["virtual_bankroll"]]
+
+    closed_grids = check_grid_updates(grid_state, markets_by_id, grid_bankroll)
+    if closed_grids:
+        logger.info(f"Grid: {len(closed_grids)} positions closed")
+        for g in closed_grids:
+            logger.info(f"  [GRID] {g['question'][:50]} | P&L: {g['pnl_usdc']:+.4f}")
+
+    new_grid_trades = []
+    for market in tradeable:
+        if not is_grid_candidate(market):
+            continue
+        if is_already_gridded(grid_state, market.get("id", "")):
+            continue
+        grid_signal = open_grid(market, grid_bankroll[0])
+        if grid_signal is None:
+            continue
+        record_grid_trade(grid_state, grid_signal, grid_bankroll)
+        new_grid_trades.append(grid_signal.__dict__ if hasattr(grid_signal, '__dict__') else vars(grid_signal))
+
+    state["virtual_bankroll"] = grid_bankroll[0]
+
+    logger.info(
+        f"Grid: {len(new_grid_trades)} new positions | "
+        f"Total P&L: ${grid_state['total_pnl']:+.4f}"
+    )
+
+    # Step 5: Save state
     state["last_run"] = today
     save_state(state)
+    save_grid_state(grid_state)
 
-    # Step 5: Notify via Telegram
+    # Step 6: Notify via Telegram
     if SEND_DAILY_REPORT:
         send_daily_report(
             state=state,
             new_trades=new_trades,
             newly_resolved=[t.__dict__ for t in newly_resolved],
+            new_grid_trades=new_grid_trades,
+            closed_grids=closed_grids,
         )
-    elif new_trades:
-        send_signal_alert(new_trades=new_trades, state=state)
+    elif new_trades or new_grid_trades:
+        send_signal_alert(new_trades=new_trades, state=state, new_grid_trades=new_grid_trades)
 
 
 if __name__ == "__main__":
