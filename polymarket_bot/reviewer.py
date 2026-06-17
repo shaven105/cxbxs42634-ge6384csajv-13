@@ -30,7 +30,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("reviewer")
 
-USE_CLAUDE = os.environ.get("REVIEWER_USE_CLAUDE", "false").lower() == "true"
+_ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+USE_CLAUDE = (
+    os.environ.get("REVIEWER_USE_CLAUDE", "false").lower() == "true"
+    and bool(_ANTHROPIC_KEY)
+    and _ANTHROPIC_KEY != "dummy"
+)
+# Auto-PR: when True, reviewer pushes a branch and opens a GitHub PR
+# with updated config when better parameters are found
+AUTO_PR = os.environ.get("REVIEWER_AUTO_PR", "true").lower() == "true"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "")  # e.g. shaven105/test1
+MIN_RESOLVED_FOR_SWEEP = 5  # need at least N resolved trades to trust the sweep
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
@@ -208,6 +219,155 @@ def grid_offset_sweep(closed_trades: list[dict]) -> list[dict]:
     return results
 
 
+# ── Auto-PR: push updated config to GitHub ───────────────────────────────────
+
+def _read_config() -> str:
+    return Path("config.py").read_text()
+
+
+def _patch_config(content: str, key: str, new_val: float) -> str:
+    """Replace a float assignment line like KEY: float = 0.03 with new_val."""
+    import re
+    pattern = rf"^({re.escape(key)}\s*:\s*float\s*=\s*)\S+"
+    replacement = rf"\g<1>{new_val}"
+    return re.sub(pattern, replacement, content, flags=re.MULTILINE)
+
+
+def _read_grid_strategy() -> str:
+    return Path("strategy_grid.py").read_text()
+
+
+def _patch_grid(content: str, key: str, new_val: float) -> str:
+    import re
+    pattern = rf"^({re.escape(key)}\s*=\s*)\S+"
+    replacement = rf"\g<1>{new_val}"
+    return re.sub(pattern, replacement, content, flags=re.MULTILINE)
+
+
+def maybe_open_pr(
+    best_threshold: dict | None,
+    best_offset: dict | None,
+    current_threshold: float = 0.03,
+    current_offset: float = 0.015,
+) -> bool:
+    """
+    If better parameters were found AND differ meaningfully from current,
+    push a branch and open a GitHub PR via the API.
+    Returns True if a PR was opened.
+    """
+    if not AUTO_PR or not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
+
+    changes: list[tuple[str, str, float, float]] = []  # (file, key, old, new)
+
+    if best_threshold and abs(best_threshold["threshold"] - current_threshold) >= 0.005:
+        changes.append(("config", "MISPRICING_THRESHOLD", current_threshold, best_threshold["threshold"]))
+
+    if best_offset and abs(best_offset["offset"] - current_offset) >= 0.002:
+        changes.append(("grid", "GRID_OFFSET", current_offset, best_offset["offset"]))
+
+    if not changes:
+        logger.info("Auto-PR: parameters already optimal, no PR needed")
+        return False
+
+    # Apply patches in memory
+    config_src = _read_config()
+    grid_src = _read_grid_strategy()
+    changed_files = {}
+
+    for (file_, key, old, new) in changes:
+        logger.info(f"Auto-PR: {key} {old} → {new}")
+        if file_ == "config":
+            config_src = _patch_config(config_src, key, new)
+            changed_files["polymarket_bot/config.py"] = config_src
+        else:
+            grid_src = _patch_grid(grid_src, key, new)
+            changed_files["polymarket_bot/strategy_grid.py"] = grid_src
+
+    # Push via GitHub API
+    import urllib.request, base64
+    from datetime import datetime, timezone
+
+    api = f"https://api.github.com/repos/{GITHUB_REPO}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    def gh(method: str, path: str, body: dict | None = None):
+        url = f"{api}{path}"
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+
+    try:
+        # Get master SHA
+        master = gh("GET", "/git/ref/heads/master")
+        base_sha = master["object"]["sha"]
+
+        # Create new branch
+        date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+        branch = f"auto/param-tune-{date_str}"
+        try:
+            gh("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": base_sha})
+        except Exception:
+            logger.info(f"Branch {branch} already exists, reusing")
+
+        # Commit each changed file
+        commit_sha = base_sha
+        for path, content in changed_files.items():
+            # Get current file SHA
+            try:
+                existing = gh("GET", f"/contents/{path}?ref={branch}")
+                file_sha = existing["sha"]
+            except Exception:
+                file_sha = None
+
+            body: dict = {
+                "message": f"auto-tune: update {path.split('/')[-1]} parameters",
+                "content": base64.b64encode(content.encode()).decode(),
+                "branch": branch,
+            }
+            if file_sha:
+                body["sha"] = file_sha
+            gh("PUT", f"/contents/{path}", body)
+
+        # Build PR description
+        change_lines = "\n".join(
+            f"- `{key}`: `{old}` → `{new}`" for (_, key, old, new) in changes
+        )
+        pr_body = f"""Auto-generated by daily strategy reviewer.
+
+## Parameter changes
+
+{change_lines}
+
+## Why
+
+Based on parameter sensitivity sweep on {sum(1 for _ in changes)} parameters.
+Human review required before merging — verify the suggested values make sense
+given current market conditions.
+
+> Merge to apply | Close to reject — reviewer will re-evaluate tomorrow.
+"""
+        pr = gh("POST", "/pulls", {
+            "title": f"[Auto] Parameter tune {date_str}",
+            "head": branch,
+            "base": "master",
+            "body": pr_body,
+        })
+        pr_url = pr.get("html_url", "")
+        logger.info(f"Auto-PR opened: {pr_url}")
+        return True
+
+    except Exception as exc:
+        logger.error(f"Auto-PR failed: {exc}")
+        return False
+
+
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 def get_claude_recommendations(summary: dict) -> str:
@@ -265,6 +425,7 @@ def build_review_report(
     offset_sweep: list[dict],
     claude_text: str,
     state: dict,
+    pr_opened: bool = False,
 ) -> str:
     from telegram_reporter import _esc
 
@@ -336,6 +497,12 @@ def build_review_report(
         lines += ["", f"{'─' * 28}", "*🤖 AI 分析建議*", ""]
         for line in claude_text.strip().split("\n"):
             lines.append(_esc(line) if line.strip() else "")
+
+    if pr_opened:
+        lines += ["", f"{'─' * 28}", "*🔀 已自動開 PR 建議更新參數*", "_請至 GitHub 審核後 merge_"]
+    elif s5_m.n_resolved + grid_m.n_resolved < MIN_RESOLVED_FOR_SWEEP:
+        remaining = MIN_RESOLVED_FOR_SWEEP - s5_m.n_resolved - grid_m.n_resolved
+        lines.append(f"\n_需再累積 {remaining} 筆已結算交易才開始自動調參_")
 
     return "\n".join(lines)
 
@@ -409,10 +576,25 @@ def main() -> None:
 
     claude_text = get_claude_recommendations(summary) if USE_CLAUDE else ""
 
+    # Auto-PR: only trigger when enough resolved data exists
+    pr_opened = False
+    if s5_m.n_resolved >= MIN_RESOLVED_FOR_SWEEP or grid_m.n_resolved >= MIN_RESOLVED_FOR_SWEEP:
+        best_thresh = _best_threshold(thresh_sweep)
+        best_off = _best_offset(offset_sweep)
+        pr_opened = maybe_open_pr(best_thresh, best_off)
+        if pr_opened:
+            logger.info("Auto-PR opened with new parameter suggestions")
+    else:
+        logger.info(
+            f"Auto-PR skipped: need {MIN_RESOLVED_FOR_SWEEP} resolved trades "
+            f"(S5={s5_m.n_resolved}, Grid={grid_m.n_resolved})"
+        )
+
     # Send Telegram
     from telegram_reporter import send_message
     report = build_review_report(
-        s5_m, grid_m, thresh_sweep, kelly_sweep, offset_sweep, claude_text, s5_state
+        s5_m, grid_m, thresh_sweep, kelly_sweep, offset_sweep, claude_text, s5_state,
+        pr_opened=pr_opened,
     )
     sent = send_message(report)
     if not sent:

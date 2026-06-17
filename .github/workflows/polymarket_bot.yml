@@ -157,10 +157,15 @@ jobs:
 
       - name: Run strategy review
         env:
-          REVIEWER_USE_CLAUDE: "true"
+          # Set to "true" only if ANTHROPIC_API_KEY secret is configured
+          REVIEWER_USE_CLAUDE: "false"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Auto-PR: opens a GitHub PR when better parameters are found
+          REVIEWER_AUTO_PR: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           cd polymarket_bot
           python reviewer.py
