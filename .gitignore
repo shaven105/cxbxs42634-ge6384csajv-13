@@ -7,4 +7,3 @@ price_cache.json
 polymarket_bot.log*
 polymarket_bot/grid_trades.json
 polymarket_bot/sniper_trades.json
-polymarket_bot/budget_state.json
