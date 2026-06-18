@@ -241,7 +241,7 @@ def send_signal_alert(
             f"  _{q}_"
         )
     if len(new_trades) > 5:
-        lines.append(f"_\\.\\.\\. 還有 {len(new_trades)-5} 筆S5_")
+        lines.append(f"_\\.\\.\\. 還有 {len(new_trades)-5} 筆_")
     for g in (new_grid_trades or [])[:3]:
         q = _esc(str(g.get("question", ""))[:40])
         bl = g.get("buy_limit", 0)

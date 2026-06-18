@@ -28,6 +28,7 @@ import requests
 from strategy_sniper import (
     _parse_crypto_question, _verify_crypto_outcome,
     fetch_crypto_prices, POLYMARKET_FEE, SNIPE_MAX_ENTRY, CRYPTO_MARGIN,
+    CRYPTO_MAP,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
@@ -197,7 +198,6 @@ def run_real_backtest() -> bool:
         if not parsed or not crypto_prices:
             continue
         sym, threshold, direction = parsed
-        from strategy_sniper import CRYPTO_MAP
         cg_id = CRYPTO_MAP[sym][0]
         live_price_raw = (crypto_prices.get(cg_id) or {}).get("usd")
         if not live_price_raw:
@@ -215,7 +215,7 @@ def run_real_backtest() -> bool:
             if ts < entry_window or ts > end_ts:
                 continue
             yes_ask = float(pt.get("p", 0)) + 0.02  # approximate ask = bid + spread
-            if yes_ask >= SNIPE_MAX_ENTRY:
+            if yes_ask > SNIPE_MAX_ENTRY:
                 continue
 
             side = outcome   # we enter on the verified outcome side

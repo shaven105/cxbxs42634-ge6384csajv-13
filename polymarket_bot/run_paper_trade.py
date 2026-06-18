@@ -74,12 +74,14 @@ _TW_BLOCKED_KEYWORDS = {
 
 def _is_blocked(market: dict) -> bool:
     """Return True if the market touches Taiwan politics/elections."""
+    tags = market.get("tags") or []
+    tags_str = " ".join(tags) if isinstance(tags, list) else str(tags)
     text = " ".join([
         (market.get("question") or ""),
         (market.get("description") or ""),
         (market.get("groupSlug") or ""),
         (market.get("category") or ""),
-        (market.get("tags") or ""),
+        tags_str,
     ]).lower()
     return any(kw in text for kw in _TW_BLOCKED_KEYWORDS)
 
@@ -286,7 +288,7 @@ def main() -> None:
     )
     for signal in sniper_candidates:
         if sniper_bankroll[0] < signal.bet_usdc:
-            break
+            continue
         record_sniper_trade(sniper_state, signal, sniper_bankroll)
         new_sniper_trades.append(signal.__dict__)
 

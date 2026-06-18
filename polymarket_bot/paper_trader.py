@@ -65,7 +65,7 @@ def check_resolutions(state: dict, markets_by_id: dict) -> list[PaperTrade]:
     Returns list of newly resolved trades.
     """
     newly_resolved = []
-    polymarket_fee = 0.02
+    polymarket_fee = 0.018  # Polymarket taker fee as of March 2026
 
     for trade_dict in state["trades"]:
         if trade_dict.get("resolved"):
@@ -109,7 +109,7 @@ def check_resolutions(state: dict, markets_by_id: dict) -> list[PaperTrade]:
             gross = bet * (1 - price) / price
             pnl = gross - bet * polymarket_fee
         else:
-            pnl = -bet - bet * polymarket_fee
+            pnl = -bet  # fee already paid at buy time; do not double-count on loss
 
         trade_dict["resolved"] = True
         trade_dict["outcome"] = won
