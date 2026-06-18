@@ -39,6 +39,11 @@ from strategy_grid import (
     load_grid_state, save_grid_state, is_grid_candidate,
     is_already_gridded, open_grid, record_grid_trade, check_grid_updates,
 )
+from strategy_sniper import (
+    load_sniper_state, save_sniper_state, is_already_sniped,
+    find_sniper_candidates, record_sniper_trade, check_sniper_resolutions,
+    fetch_crypto_prices,
+)
 from telegram_reporter import send_daily_report, send_signal_alert
 
 NICHE_CATEGORIES = {"weather", "science", "entertainment"}
@@ -257,10 +262,46 @@ def main() -> None:
         f"Total P&L: ${grid_state['total_pnl']:+.4f}"
     )
 
+    # Step 4b: S3 Near-Expiry Certainty Sniper
+    sniper_state = load_sniper_state()
+    sniper_bankroll = [state["virtual_bankroll"]]
+
+    # Resolve existing sniper positions
+    closed_snipers = check_sniper_resolutions(sniper_state, markets_by_id, sniper_bankroll)
+    if closed_snipers:
+        logger.info(f"Sniper: {len(closed_snipers)} positions resolved")
+
+    # Fetch crypto prices once for all sniper candidates
+    crypto_prices = fetch_crypto_prices()
+    if crypto_prices:
+        logger.info(f"Crypto prices fetched: {list(crypto_prices.keys())}")
+
+    # Scan all legal markets (not just tradeable) to catch more near-expiry candidates
+    new_sniper_trades = []
+    sniper_candidates = find_sniper_candidates(
+        markets=raw_markets_clean,
+        bankroll=sniper_bankroll[0],
+        sniper_state=sniper_state,
+        crypto_prices=crypto_prices,
+    )
+    for signal in sniper_candidates:
+        if sniper_bankroll[0] < signal.bet_usdc:
+            break
+        record_sniper_trade(sniper_state, signal, sniper_bankroll)
+        new_sniper_trades.append(signal.__dict__)
+
+    state["virtual_bankroll"] = sniper_bankroll[0]
+
+    logger.info(
+        f"Sniper: {len(new_sniper_trades)} new positions | "
+        f"Total P&L: ${sniper_state['total_pnl']:+.4f}"
+    )
+
     # Step 5: Save state
     state["last_run"] = today
     save_state(state)
     save_grid_state(grid_state)
+    save_sniper_state(sniper_state)
 
     # Step 6: Notify via Telegram
     if SEND_DAILY_REPORT:
@@ -270,9 +311,16 @@ def main() -> None:
             newly_resolved=[t.__dict__ for t in newly_resolved],
             new_grid_trades=new_grid_trades,
             closed_grids=closed_grids,
+            new_sniper_trades=new_sniper_trades,
+            closed_snipers=closed_snipers,
         )
-    elif new_trades or new_grid_trades:
-        send_signal_alert(new_trades=new_trades, state=state, new_grid_trades=new_grid_trades)
+    elif new_trades or new_grid_trades or new_sniper_trades:
+        send_signal_alert(
+            new_trades=new_trades,
+            state=state,
+            new_grid_trades=new_grid_trades,
+            new_sniper_trades=new_sniper_trades,
+        )
 
 
 if __name__ == "__main__":
