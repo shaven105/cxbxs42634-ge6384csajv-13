@@ -6,8 +6,8 @@ on:
     - cron: "0 15 * * *"
     # Daily strategy review: 08:30 Taiwan = 00:30 UTC
     - cron: "30 0 * * *"
-    # Intraday S5 niche scan: every 30 min
-    - cron: "*/30 * * * *"
+    # Intraday scan: every 5 min (budget-guarded; see Check monthly budget step)
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
@@ -49,6 +49,7 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
+            polymarket_bot/budget_state.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
@@ -72,9 +73,10 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
+            polymarket_bot/budget_state.json
           key: paper-state-${{ github.run_id }}
 
-  # ── Job 2: Intraday S5 niche scan every 15 min ───────────────────────────────
+  # ── Job 2: Intraday scan every 5 min (budget-guarded) ────────────────────────
   paper_scan:
     name: "Intraday Paper Scan"
     runs-on: ubuntu-latest
@@ -85,17 +87,16 @@ jobs:
       !startsWith(github.event.schedule, '0 15') &&
       !startsWith(github.event.schedule, '30 0')
 
+    # Prevent concurrent runs: if a scan is already running, queue at most one
+    # successor (GitHub drops older queued jobs automatically).
+    concurrency:
+      group: paper-scan
+      cancel-in-progress: false
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r polymarket_bot/requirements.txt -q
-
+      # Restore state files BEFORE the budget check so the counter is up-to-date.
       - name: Restore paper trade state
         uses: actions/cache@v4
         with:
@@ -103,11 +104,77 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
+            polymarket_bot/budget_state.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
 
-      - name: Scan niche markets + alert on new signals
+      # ── Budget guard ────────────────────────────────────────────────────────
+      # Checks monthly scan count against MONTHLY_SCAN_LIMIT (default 716).
+      # 716 × 2.5 min ≈ 1,790 min, leaving ~210 min for daily report + review.
+      # Total ≈ 2,000 min/month = GitHub free-tier limit for private repos.
+      #
+      # To raise the limit (e.g. on a paid plan):
+      #   GitHub → Settings → Actions → Variables → MONTHLY_SCAN_LIMIT = 2000
+      # To lower it (conserve quota):
+      #   Set MONTHLY_SCAN_LIMIT = 300 (≈ 750 min/month)
+      #
+      # When the limit is hit, this step sets skip=true and subsequent steps are
+      # skipped — no Python install, no Gamma API calls, job exits in ~20 seconds.
+      - name: Check monthly scan budget
+        id: budget
+        shell: python3 {0}
+        run: |
+          import json, os, sys
+          from datetime import datetime, timezone
+
+          BUDGET_FILE = "polymarket_bot/budget_state.json"
+          MAX_RUNS = int(os.environ.get("MONTHLY_SCAN_LIMIT", "716"))
+          month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+          try:
+              with open(BUDGET_FILE) as f:
+                  state = json.load(f)
+              if state.get("month") != month:
+                  state = {"month": month, "runs": 0}
+          except Exception:
+              state = {"month": month, "runs": 0}
+
+          runs = state.get("runs", 0)
+          out = os.environ.get("GITHUB_OUTPUT", "")
+
+          if runs >= MAX_RUNS:
+              print(f"::notice::Monthly scan limit reached ({runs}/{MAX_RUNS} for {month}). "
+                    f"Skipping — set MONTHLY_SCAN_LIMIT in repo Variables to adjust.")
+              if out:
+                  open(out, "a").write("skip=true\n")
+          else:
+              state["runs"] = runs + 1
+              os.makedirs("polymarket_bot", exist_ok=True)
+              with open(BUDGET_FILE, "w") as f:
+                  json.dump(state, f, indent=2)
+              remaining = MAX_RUNS - state["runs"]
+              print(f"::notice::Scan {state['runs']}/{MAX_RUNS} for {month} "
+                    f"({remaining} scans remaining this month)")
+              if out:
+                  open(out, "a").write("skip=false\n")
+        env:
+          MONTHLY_SCAN_LIMIT: ${{ vars.MONTHLY_SCAN_LIMIT || '716' }}
+
+      # All subsequent steps are skipped when monthly budget is exhausted.
+      - name: Setup Python
+        if: steps.budget.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        if: steps.budget.outputs.skip != 'true'
+        run: pip install -r polymarket_bot/requirements.txt -q
+
+      - name: Scan markets + alert on new signals
+        if: steps.budget.outputs.skip != 'true'
         env:
           PAPER_ESTIMATOR: free
           SEND_DAILY_REPORT: "false"
@@ -118,6 +185,7 @@ jobs:
           cd polymarket_bot
           python run_paper_trade.py
 
+      # Always save state (even when budget exceeded, to persist the counter).
       - name: Save paper trade state
         if: always()
         uses: actions/cache@v4
@@ -126,6 +194,7 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
+            polymarket_bot/budget_state.json
           key: paper-state-${{ github.run_id }}
 
   # ── Job 3: Daily strategy review (00:30 UTC = 08:30 Taiwan) ─────────────────
@@ -156,6 +225,7 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
+            polymarket_bot/budget_state.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
@@ -178,15 +248,29 @@ jobs:
           cd polymarket_bot
           python reviewer.py
 
+      - name: Save trade state
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
+            polymarket_bot/budget_state.json
+          key: paper-state-${{ github.run_id }}
+
   # ── Job 4: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
   # Add these crons to the schedule trigger above:
-  #   - cron: "*/10 8-22 * * *"   # every 10 min active hours
-  #   - cron: "0 22-23,0-7 * * *" # every hour off-peak
+  #   - cron: "*/5 8-22 * * *"    # every 5 min active hours
+  #   - cron: "*/15 22-23,0-7 * * *"  # every 15 min off-peak
   #
   # live_scan:
   #   name: "Live Market Scan"
   #   runs-on: ubuntu-latest
   #   timeout-minutes: 8
+  #   concurrency:
+  #     group: live-scan
+  #     cancel-in-progress: false
   #   if: >
   #     github.event_name == 'schedule' &&
   #     !startsWith(github.event.schedule, '0 15')
