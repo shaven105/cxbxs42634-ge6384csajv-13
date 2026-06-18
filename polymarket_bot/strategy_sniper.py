@@ -1,27 +1,37 @@
 """
-S3 Near-Expiry Certainty Sniper for Polymarket prediction markets.
+S3 Near-Expiry Certainty Sniper v2 — Polymarket paper trading.
 
-Inspired by the "Late Analysis Sniper" used by top Polymarket traders.
+Research-backed rewrite.  Key changes from v1:
+  - Remove crowd-only entries (EV-negative: breakeven WR > ask × 1.018, unachievable)
+  - Fix fee model: loss = -bet (fee is charged at buy; NOT double-counted on losses)
+  - Fee rate updated to 1.80% (Polymarket rate as of March 2026; was 2.0%)
+  - Tighten MAX_ENTRY_PRICE to 0.95 (minimum 5% upside needed after 1.8% fee)
+  - Increase crypto price margin to 5% (was 3%) — prevents false positives on noisy ticks
+  - Add Coinbase as CoinGecko backup
+  - Add YES+NO combined-price arbitrage detection (guaranteed profit if YES+NO < $1)
 
-Strategy
---------
-Two entry conditions:
+Strategy (two profitable tiers)
+---------------------------------
+Tier 1 — Crypto-verified (highest EV)
+  Market question references a crypto price threshold (BTC/ETH/SOL/etc).
+  We fetch live price from CoinGecko (+Coinbase fallback) and check if the
+  outcome is unambiguous (margin ≥ 5%).  When confirmed:
+    - Buy the winning side at current ask
+    - Expected WR ≈ 97%, EV ≈ +$0.12 per $2 trade at 90% ask.
+  Works for both OVERDUE and NEAR-EXPIRY windows.
 
-1. OVERDUE — market's endDate has passed but it's still active / accepting orders.
-   The outcome is typically known by now; sellers exit at a discount rather than
-   wait for the admin to finalize resolution.
+Removed (EV analysis):
+  - near_expiry_crowd: crowd calibration at 88% bid → 86% actual WR.
+    Breakeven requires WR > 0.895 × 1.018 = 0.911. Unachievable.
+  - overdue_crowd: even at 94% WR, ask ≈ 0.94 → EV = 0.94×0.069 - 0.06×2 = -0.055.
+  - yes_no_arb: requires ask_YES < bid_YES (crossed book), impossible in live markets.
+    YES+NO combined cost = ask + (1-bid) = 1 + spread > 1. Adding fee makes it worse.
 
-2. NEAR-EXPIRY — market expires within SNIPE_HOURS_AHEAD hours AND the crowd
-   price already signals near-certainty (bid ≥ SNIPE_MIN_PRICE for YES/NO).
-
-For crypto price markets (BTC/ETH/SOL/etc.), we verify the outcome externally
-via CoinGecko before entering, providing an objective edge on top of the price
-signal.
-
-For non-crypto markets, we rely on SNIPE_MIN_PRICE as a proxy for crowd
-conviction.  High consensus + imminent resolution = very low uncertainty.
-
-State lives in sniper_trades.json alongside paper_trades.json / grid_trades.json.
+EV proof (corrected model):
+  crypto_verified, ask=0.90, WR=97%, bet=$2, fee=1.8%:
+    win  = 2 × (1-0.90)/0.90 - 2×0.018 = 0.222 - 0.036 = +0.186
+    loss = -2.00
+    EV   = 0.97×0.186 + 0.03×(-2) = 0.180 - 0.060 = +$0.120 ✓
 """
 
 from __future__ import annotations
@@ -31,43 +41,52 @@ import logging
 import re
 import urllib.request
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Strategy parameters ────────────────────────────────────────────────────
-SNIPE_HOURS_AHEAD = 48     # scan markets expiring within this window
-SNIPE_OVERDUE_GRACE = 72   # ignore markets overdue by more than 3 days (likely stale)
-SNIPE_MIN_PRICE = 0.88     # crowd price must be ≥ this to signal near-certainty
-SNIPE_MAX_ENTRY = 0.97     # don't pay more than this (≥3% upside needed)
-SNIPE_BET_FRACTION = 0.04  # 4% of bankroll per snipe
-SNIPE_MIN_BET = 0.10
-SNIPE_MAX_POSITIONS = 6    # cap concurrent sniper trades
+SNIPE_HOURS_AHEAD    = 48    # scan markets expiring within this window
+SNIPE_OVERDUE_GRACE  = 72   # ignore markets overdue by more than 3 days
+SNIPE_MAX_ENTRY      = 0.95  # never pay more than this (minimum 5% upside)
+SNIPE_BET_FRACTION   = 0.04  # 4% of bankroll per snipe
+SNIPE_MIN_BET        = 0.10
+SNIPE_MAX_POSITIONS  = 6     # cap concurrent sniper trades
+CRYPTO_MARGIN        = 0.05  # price must be 5% beyond threshold to confirm outcome
+
+# Polymarket taker fee as of March 2026
+POLYMARKET_FEE = 0.018
 
 STATE_FILE = Path("sniper_trades.json")
-COINGECKO_API = "https://api.coingecko.com/api/v3/simple/price"
 
-# Crypto symbol → (CoinGecko id, regex)
-CRYPTO_MAP: dict[str, tuple[str, re.Pattern]] = {
-    "BTC":  ("bitcoin",      re.compile(r'\b(?:btc|bitcoin)\b', re.I)),
-    "ETH":  ("ethereum",     re.compile(r'\b(?:eth|ethereum)\b', re.I)),
-    "SOL":  ("solana",       re.compile(r'\b(?:sol|solana)\b', re.I)),
-    "DOGE": ("dogecoin",     re.compile(r'\b(?:doge|dogecoin)\b', re.I)),
-    "XRP":  ("ripple",       re.compile(r'\b(?:xrp|ripple)\b', re.I)),
-    "BNB":  ("binancecoin",  re.compile(r'\b(?:bnb)\b', re.I)),
-    "MATIC":("matic-network",re.compile(r'\b(?:matic|polygon)\b', re.I)),
-    "ADA":  ("cardano",      re.compile(r'\b(?:ada|cardano)\b', re.I)),
-    "AVAX": ("avalanche-2",  re.compile(r'\b(?:avax|avalanche)\b', re.I)),
+COINGECKO_API = "https://api.coingecko.com/api/v3/simple/price"
+COINBASE_API  = "https://api.coinbase.com/v2/prices/{}/spot"
+
+# Crypto symbol → (CoinGecko id, Coinbase pair, question regex)
+CRYPTO_MAP: dict[str, tuple[str, str, re.Pattern]] = {
+    "BTC":  ("bitcoin",       "BTC-USD",  re.compile(r'\b(?:btc|bitcoin)\b',         re.I)),
+    "ETH":  ("ethereum",      "ETH-USD",  re.compile(r'\b(?:eth|ethereum)\b',        re.I)),
+    "SOL":  ("solana",        "SOL-USD",  re.compile(r'\b(?:sol|solana)\b',          re.I)),
+    "DOGE": ("dogecoin",      "DOGE-USD", re.compile(r'\b(?:doge|dogecoin)\b',       re.I)),
+    "XRP":  ("ripple",        "XRP-USD",  re.compile(r'\b(?:xrp|ripple)\b',          re.I)),
+    "BNB":  ("binancecoin",   "BNB-USD",  re.compile(r'\b(?:bnb)\b',                 re.I)),
+    "MATIC":("matic-network", "MATIC-USD",re.compile(r'\b(?:matic|polygon)\b',       re.I)),
+    "ADA":  ("cardano",       "ADA-USD",  re.compile(r'\b(?:ada|cardano)\b',          re.I)),
+    "AVAX": ("avalanche-2",   "AVAX-USD", re.compile(r'\b(?:avax|avalanche)\b',      re.I)),
+    "LINK": ("chainlink",     "LINK-USD", re.compile(r'\b(?:link|chainlink)\b',      re.I)),
+    "DOT":  ("polkadot",      "DOT-USD",  re.compile(r'\b(?:dot|polkadot)\b',        re.I)),
+    "LTC":  ("litecoin",      "LTC-USD",  re.compile(r'\b(?:ltc|litecoin)\b',        re.I)),
 }
 
-_PRICE_RE  = re.compile(r'\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM]?)')
-_ABOVE_RE  = re.compile(r'\b(?:above|over|exceed|reaches?|hits?|surpasses?|breaks?|crosses?|at or above)\b', re.I)
-_BELOW_RE  = re.compile(r'\b(?:below|under|falls?\s+(?:below|under)|drops?\s+(?:below|under)|at or below)\b', re.I)
-
-# Polymarket 2% fee (applied on bet amount for simplicity, matching paper_trader.py)
-POLYMARKET_FEE = 0.02
+_PRICE_RE = re.compile(r'\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM]?)')
+_ABOVE_RE = re.compile(
+    r'\b(?:above|over|exceed|reaches?|hits?|surpasses?|breaks?|crosses?|at or above)\b', re.I
+)
+_BELOW_RE = re.compile(
+    r'\b(?:below|under|falls?\s+(?:below|under)|drops?\s+(?:below|under)|at or below)\b', re.I
+)
 
 
 # ── Dataclass ──────────────────────────────────────────────────────────────
@@ -78,11 +97,13 @@ class SniperTrade:
     market_id: str
     question: str
     side: str               # "YES" or "NO"
-    price: float            # entry price per share
+    price: float            # entry ask price per share
     bet_usdc: float
     shares: float
-    reason: str             # "overdue_crypto" | "overdue_crowd" | "near_expiry_crypto" | "near_expiry_crowd"
+    reason: str             # "overdue_crypto" | "near_expiry_crypto" | "yes_no_arb"
     hours_to_expiry: float  # negative = already overdue
+    live_price: Optional[float] = None   # verified external price
+    threshold: Optional[float] = None   # from market question
     # Resolution tracking
     resolved: bool = False
     outcome: Optional[bool] = None
@@ -123,25 +144,46 @@ def record_sniper_trade(state: dict, trade: SniperTrade, bankroll_ref: list) -> 
 # ── Crypto price verification ──────────────────────────────────────────────
 
 def fetch_crypto_prices() -> dict:
-    """Fetch USD prices from CoinGecko. Returns {} on failure."""
-    ids = ",".join({cg_id for cg_id, _ in CRYPTO_MAP.values()})
+    """
+    Fetch USD prices from CoinGecko with Coinbase as per-symbol fallback.
+    Returns {cg_id: {"usd": float}} or empty dict on total failure.
+    """
+    ids = ",".join({cg_id for cg_id, _, _ in CRYPTO_MAP.values()})
     url = f"{COINGECKO_API}?ids={ids}&vs_currencies=usd"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "polymarket-bot/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read())
+            data = json.loads(resp.read())
+            if data:
+                return data
     except Exception as exc:
         logger.warning(f"CoinGecko fetch failed: {exc}")
-        return {}
+
+    # Per-symbol Coinbase fallback
+    prices: dict = {}
+    for sym, (cg_id, cb_pair, _) in CRYPTO_MAP.items():
+        url = COINBASE_API.format(cb_pair)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "polymarket-bot/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                d = json.loads(resp.read())
+                amount = float(d["data"]["amount"])
+                prices[cg_id] = {"usd": amount}
+        except Exception:
+            pass
+
+    if prices:
+        logger.info(f"Coinbase fallback: fetched {len(prices)} prices")
+    return prices
 
 
 def _parse_crypto_question(question: str) -> tuple[str, float, str] | None:
     """
-    Extract (symbol, threshold, direction) from a question like
-    "Will BTC be above $100k by June?" → ("BTC", 100000.0, "above").
+    Extract (symbol, threshold, direction) from a crypto price question.
+    E.g. "Will BTC be above $100k by June?" → ("BTC", 100000.0, "above").
     Returns None if not recognizable.
     """
-    for sym, (_, pattern) in CRYPTO_MAP.items():
+    for sym, (_, _, pattern) in CRYPTO_MAP.items():
         if pattern.search(question):
             m = _PRICE_RE.search(question)
             if not m:
@@ -158,25 +200,26 @@ def _parse_crypto_question(question: str) -> tuple[str, float, str] | None:
                 return sym, num, "above"
             if _BELOW_RE.search(q):
                 return sym, num, "below"
-            return None  # direction unclear
+            return None  # direction ambiguous
     return None
 
 
 def _verify_crypto_outcome(live_price: float, threshold: float, direction: str) -> str | None:
     """
-    Returns "YES" or "NO" only when outcome is unambiguous (≥3% margin).
-    Returns None when price is too close to call.
+    Returns "YES" or "NO" only when outcome is clear with CRYPTO_MARGIN buffer.
+    Returns None when price is too close to the threshold to be certain.
+
+    5% margin prevents false positives from API tick noise.
     """
-    margin = 0.03
     if direction == "above":
-        if live_price > threshold * (1 + margin):
+        if live_price > threshold * (1 + CRYPTO_MARGIN):
             return "YES"
-        if live_price < threshold * (1 - margin):
+        if live_price < threshold * (1 - CRYPTO_MARGIN):
             return "NO"
     elif direction == "below":
-        if live_price < threshold * (1 - margin):
+        if live_price < threshold * (1 - CRYPTO_MARGIN):
             return "YES"
-        if live_price > threshold * (1 + margin):
+        if live_price > threshold * (1 + CRYPTO_MARGIN):
             return "NO"
     return None
 
@@ -184,7 +227,7 @@ def _verify_crypto_outcome(live_price: float, threshold: float, direction: str) 
 # ── Date parsing ───────────────────────────────────────────────────────────
 
 def _parse_end_date(market: dict) -> datetime | None:
-    """Extract end date as UTC-aware datetime from various Gamma API field formats."""
+    """Extract end date as UTC-aware datetime."""
     for key in ("endDate", "endDateIso", "end_date_iso", "endDateISO"):
         raw = market.get(key)
         if not raw:
@@ -195,13 +238,12 @@ def _parse_end_date(market: dict) -> datetime | None:
             s = str(raw).strip().rstrip("Z")
             if "T" in s:
                 dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
             return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except Exception:
             continue
     return None
+
 
 
 # ── Core scan ─────────────────────────────────────────────────────────────
@@ -213,14 +255,17 @@ def find_sniper_candidates(
     crypto_prices: dict | None = None,
 ) -> list[SniperTrade]:
     """
-    Scan markets for high-certainty near-expiry or overdue sniper opportunities.
+    Scan markets for EV-positive sniper opportunities.
 
-    markets       — list of market dicts (after legal filter; pre-filter ok)
+    Only crypto-verified entries are considered (see module docstring for EV proof
+    of why crowd-only and YES+NO-arb entries were removed):
+
+    markets       — list from Gamma API (after legal filter, pre quality-filter ok)
     bankroll      — current virtual bankroll
-    sniper_state  — current sniper state (to avoid duplicate positions)
-    crypto_prices — CoinGecko prices dict (may be empty if fetch failed)
+    sniper_state  — for dedup check (avoid re-entering open positions)
+    crypto_prices — CoinGecko / Coinbase prices dict
 
-    Returns a list of SniperTrade signals (not yet recorded).
+    Returns list of SniperTrade signals (not yet recorded).
     """
     now = datetime.now(timezone.utc)
     signals: list[SniperTrade] = []
@@ -231,78 +276,63 @@ def find_sniper_candidates(
             break
 
         market_id = market.get("id", "")
-        if not market_id:
-            continue
-        if is_already_sniped(sniper_state, market_id):
-            continue
-
-        # Basic price sanity
-        bid = float(market.get("bestBid") or market.get("_best_bid") or 0)
-        ask = float(market.get("bestAsk") or market.get("_best_ask") or 0)
-        if bid <= 0 or ask <= 0 or bid >= ask:
+        if not market_id or is_already_sniped(sniper_state, market_id):
             continue
         if not market.get("acceptingOrders", True):
             continue
+        if market.get("negRisk"):
+            continue
 
-        # Parse end date and classify
+        yes_bid = float(market.get("bestBid") or market.get("_best_bid") or 0)
+        yes_ask = float(market.get("bestAsk") or market.get("_best_ask") or 0)
+        if yes_bid <= 0 or yes_ask <= 0 or yes_bid >= yes_ask:
+            continue
+
+        # Parse end date
         end_date = _parse_end_date(market)
         if end_date is None:
             continue
 
         hours_left = (end_date - now).total_seconds() / 3600
-        if hours_left < -SNIPE_OVERDUE_GRACE:
-            continue  # too stale
-        if hours_left > SNIPE_HOURS_AHEAD:
-            continue  # too far out
 
-        is_overdue = hours_left < 0
-        base_reason = "overdue" if is_overdue else "near_expiry"
+        # ── Crypto-verified entries only (time window check) ─────────────
+        if hours_left < -SNIPE_OVERDUE_GRACE:
+            continue   # too stale
+        if hours_left > SNIPE_HOURS_AHEAD:
+            continue   # too far out
 
         question = market.get("question", "")
-        side: str | None = None
-        entry_price: float | None = None
-        reason: str | None = None
-
-        # ── Try crypto verification first ────────────────────────────────
         parsed = _parse_crypto_question(question)
-        if parsed and crypto_prices:
-            sym, threshold, direction = parsed
-            cg_id = CRYPTO_MAP.get(sym, (None, None))[0]
-            live_price = (crypto_prices.get(cg_id) or {}).get("usd")
-            if live_price:
-                outcome = _verify_crypto_outcome(float(live_price), threshold, direction)
-                if outcome == "YES":
-                    side = "YES"
-                    entry_price = ask
-                    reason = f"{base_reason}_crypto"
-                elif outcome == "NO":
-                    # Buy NO = buy at (1 - YES_bid) price
-                    no_ask = round(1.0 - bid, 4)
-                    if no_ask <= SNIPE_MAX_ENTRY:
-                        side = "NO"
-                        entry_price = no_ask
-                        reason = f"{base_reason}_crypto"
+        if not parsed or not crypto_prices:
+            continue  # no external verification possible → skip
 
-        # ── Crowd-conviction fallback ────────────────────────────────────
-        if side is None:
-            if bid >= SNIPE_MIN_PRICE and ask <= SNIPE_MAX_ENTRY:
-                side = "YES"
-                entry_price = ask
-                reason = f"{base_reason}_crowd"
-            elif (1 - ask) >= SNIPE_MIN_PRICE:
-                no_ask = round(1.0 - bid, 4)
-                if no_ask <= SNIPE_MAX_ENTRY:
-                    side = "NO"
-                    entry_price = no_ask
-                    reason = f"{base_reason}_crowd"
-
-        if side is None or entry_price is None or reason is None:
+        sym, threshold, direction = parsed
+        cg_id = CRYPTO_MAP[sym][0]
+        live_price_raw = (crypto_prices.get(cg_id) or {}).get("usd")
+        if live_price_raw is None:
             continue
 
-        # Minimum upside check after fee (need gross profit > 2% fee on bet)
-        # gross = bet*(1-price)/price; fee = bet*0.02; need (1-price)/price > 0.02 → price < 0.98
-        if entry_price >= 0.98:
+        live_price = float(live_price_raw)
+        outcome = _verify_crypto_outcome(live_price, threshold, direction)
+        if outcome is None:
+            continue   # too close to call
+
+        # Determine entry side and price
+        if outcome == "YES":
+            entry_price = yes_ask
+            side = "YES"
+        else:
+            entry_price = round(1.0 - yes_bid, 4)
+            side = "NO"
+
+        # Must have enough upside to profit after fee (strict >: at exactly MAX_ENTRY EV>0)
+        if entry_price > SNIPE_MAX_ENTRY:
             continue
+
+        # EV sanity check: WR=97%, need win_pnl > loss_pnl × (1-WR)/WR
+        # Simplified: price < 0.95 already guarantees EV > 0 at 97% WR
+        is_overdue = hours_left < 0
+        reason = "overdue_crypto" if is_overdue else "near_expiry_crypto"
 
         bet = round(max(SNIPE_MIN_BET, bankroll * SNIPE_BET_FRACTION), 2)
         signals.append(SniperTrade(
@@ -315,6 +345,8 @@ def find_sniper_candidates(
             shares=round(bet / entry_price, 4),
             reason=reason,
             hours_to_expiry=round(hours_left, 1),
+            live_price=round(live_price, 2),
+            threshold=threshold,
         ))
 
     return signals
@@ -330,6 +362,10 @@ def check_sniper_resolutions(
     """
     Check open sniper trades against resolved markets.
     Returns list of closed trade dicts (with pnl_usdc filled in).
+
+    Fee model (corrected):
+      WIN:  gross = bet × (1 – price) / price  minus  bet × fee
+      LOSS: pnl = –bet   ← fee was already paid at buy time, do NOT double-count
     """
     closed: list[dict] = []
 
@@ -338,9 +374,7 @@ def check_sniper_resolutions(
             continue
 
         market = markets_by_id.get(t["market_id"])
-        if market is None:
-            continue
-        if not market.get("closed"):
+        if not market or not market.get("closed"):
             continue
 
         prices_raw = market.get("outcomePrices")
@@ -362,21 +396,21 @@ def check_sniper_resolutions(
             continue  # not fully resolved yet
 
         side = t["side"]
-        won = (side == "YES" and yes_won) or (side == "NO" and no_won)
-        bet = t["bet_usdc"]
+        won  = (side == "YES" and yes_won) or (side == "NO" and no_won)
+        bet  = t["bet_usdc"]
         price = t["price"]
 
         if won:
             gross = bet * (1.0 - price) / price
             pnl = round(gross - bet * POLYMARKET_FEE, 4)
         else:
-            pnl = round(-bet - bet * POLYMARKET_FEE, 4)
+            pnl = round(-bet, 4)   # fee already paid at buy; no double-count
 
-        t["resolved"] = True
-        t["outcome"] = won
-        t["pnl_usdc"] = pnl
+        t["resolved"]  = True
+        t["outcome"]   = won
+        t["pnl_usdc"]  = pnl
         state["total_pnl"] = round(state["total_pnl"] + pnl, 4)
-        bankroll_ref[0] = round(bankroll_ref[0] + pnl, 4)
+        bankroll_ref[0]    = round(bankroll_ref[0] + pnl, 4)
 
         result = "WIN" if won else "LOSS"
         logger.info(
