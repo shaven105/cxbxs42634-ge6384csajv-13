@@ -6,8 +6,8 @@ on:
     - cron: "0 15 * * *"
     # Daily strategy review: 08:30 Taiwan = 00:30 UTC
     - cron: "30 0 * * *"
-    # Intraday S5 niche scan: every 30 min
-    - cron: "*/30 * * * *"
+    # Intraday scan: every 5 min
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
@@ -48,6 +48,7 @@ jobs:
           path: |
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
@@ -70,9 +71,10 @@ jobs:
           path: |
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
           key: paper-state-${{ github.run_id }}
 
-  # ── Job 2: Intraday S5 niche scan every 15 min ───────────────────────────────
+  # ── Job 2: Intraday scan every 5 min ─────────────────────────────────────────
   paper_scan:
     name: "Intraday Paper Scan"
     runs-on: ubuntu-latest
@@ -82,6 +84,12 @@ jobs:
       github.event_name == 'schedule' &&
       !startsWith(github.event.schedule, '0 15') &&
       !startsWith(github.event.schedule, '30 0')
+
+    # Prevent concurrent runs: if a scan is still running when the next 5-min
+    # tick fires, queue at most one successor (GitHub drops older queued jobs).
+    concurrency:
+      group: paper-scan
+      cancel-in-progress: false
 
     steps:
       - uses: actions/checkout@v4
@@ -100,11 +108,12 @@ jobs:
           path: |
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
 
-      - name: Scan niche markets + alert on new signals
+      - name: Scan markets + alert on new signals
         env:
           PAPER_ESTIMATOR: free
           SEND_DAILY_REPORT: "false"
@@ -122,6 +131,7 @@ jobs:
           path: |
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
           key: paper-state-${{ github.run_id }}
 
   # ── Job 3: Daily strategy review (00:30 UTC = 08:30 Taiwan) ─────────────────
@@ -151,21 +161,18 @@ jobs:
           path: |
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
           key: paper-state-${{ github.run_id }}
           restore-keys: |
             paper-state-
 
       - name: Run strategy review
         env:
-          # Set to "true" only if ANTHROPIC_API_KEY secret is configured
           REVIEWER_USE_CLAUDE: "false"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Auto-PR: opens a GitHub PR when better parameters are found
           REVIEWER_AUTO_PR: "true"
-          # AUTO_MERGE switch: set via GitHub Settings → Variables → Actions
-          # true = auto-merge the param PR; false = open PR for manual review
           REVIEWER_AUTO_MERGE: ${{ vars.AUTO_MERGE_PARAM_PR || 'false' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -173,15 +180,24 @@ jobs:
           cd polymarket_bot
           python reviewer.py
 
+      - name: Save trade state
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: |
+            polymarket_bot/paper_trades.json
+            polymarket_bot/grid_trades.json
+            polymarket_bot/sniper_trades.json
+          key: paper-state-${{ github.run_id }}
+
   # ── Job 4: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
-  # Add these crons to the schedule trigger above:
-  #   - cron: "*/10 8-22 * * *"   # every 10 min active hours
-  #   - cron: "0 22-23,0-7 * * *" # every hour off-peak
-  #
   # live_scan:
   #   name: "Live Market Scan"
   #   runs-on: ubuntu-latest
   #   timeout-minutes: 8
+  #   concurrency:
+  #     group: live-scan
+  #     cancel-in-progress: false
   #   if: >
   #     github.event_name == 'schedule' &&
   #     !startsWith(github.event.schedule, '0 15')

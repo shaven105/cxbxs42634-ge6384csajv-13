@@ -6,3 +6,4 @@ paper_trades.json
 price_cache.json
 polymarket_bot.log*
 polymarket_bot/grid_trades.json
+polymarket_bot/sniper_trades.json

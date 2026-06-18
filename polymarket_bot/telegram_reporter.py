@@ -86,6 +86,8 @@ def build_daily_report(
     newly_resolved: list,
     new_grid_trades: list | None = None,
     closed_grids: list | None = None,
+    new_sniper_trades: list | None = None,
+    closed_snipers: list | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y\\-%m\\-%d %H:%M UTC")
     bankroll = state["virtual_bankroll"]
@@ -169,6 +171,30 @@ def build_daily_report(
             pnl_str = _esc(f"+${pnl:.3f}" if pnl >= 0 else f"-${abs(pnl):.3f}")
             lines.append(f"{emoji} `{pnl_str}` — _{q}_")
 
+    # S3 Sniper section
+    if new_sniper_trades:
+        lines.append(f"\n*🎯 狙擊新倉位 \\({len(new_sniper_trades)} 筆\\)*")
+        for s in new_sniper_trades[:4]:
+            q = _esc(str(s.get("question", ""))[:40])
+            side = s.get("side", "")
+            price = s.get("price", 0)
+            h = s.get("hours_to_expiry", 0)
+            reason = _esc(str(s.get("reason", "")))
+            h_str = _esc(f"{h:+.0f}h") if h < 0 else _esc(f"{h:.0f}h left")
+            lines.append(
+                f"• `{side}` @ `{price:.3f}` \\| {h_str} \\| `{reason}`\n"
+                f"  _{q}_"
+            )
+
+    if closed_snipers:
+        lines.append(f"\n*🎯 狙擊結算 \\({len(closed_snipers)} 筆\\)*")
+        for s in closed_snipers[:4]:
+            pnl = s.get("pnl_usdc", 0) or 0
+            emoji = "✅" if pnl >= 0 else "❌"
+            q = _esc(str(s.get("question", ""))[:38])
+            pnl_str = _esc(f"+${pnl:.4f}" if pnl >= 0 else f"-${abs(pnl):.4f}")
+            lines.append(f"{emoji} `{pnl_str}` — _{q}_")
+
     return "\n".join(lines)
 
 
@@ -178,16 +204,27 @@ def send_daily_report(
     newly_resolved: list,
     new_grid_trades: list | None = None,
     closed_grids: list | None = None,
+    new_sniper_trades: list | None = None,
+    closed_snipers: list | None = None,
 ) -> None:
-    msg = build_daily_report(state, new_trades, newly_resolved, new_grid_trades, closed_grids)
+    msg = build_daily_report(
+        state, new_trades, newly_resolved,
+        new_grid_trades, closed_grids,
+        new_sniper_trades, closed_snipers,
+    )
     send_message(msg)
 
 
-def send_signal_alert(new_trades: list, state: dict, new_grid_trades: list | None = None) -> None:
+def send_signal_alert(
+    new_trades: list,
+    state: dict,
+    new_grid_trades: list | None = None,
+    new_sniper_trades: list | None = None,
+) -> None:
     """Brief Telegram alert when intraday scan finds new signals."""
     bankroll = state["virtual_bankroll"]
     now = datetime.now(timezone.utc).strftime("%Y\\-%m\\-%d %H:%M UTC")
-    count = len(new_trades) + len(new_grid_trades or [])
+    count = len(new_trades) + len(new_grid_trades or []) + len(new_sniper_trades or [])
     lines = [
         f"*🆕 模擬新信號 \\({count} 筆\\)*",
         f"_{now}_",
@@ -204,7 +241,7 @@ def send_signal_alert(new_trades: list, state: dict, new_grid_trades: list | Non
             f"  _{q}_"
         )
     if len(new_trades) > 5:
-        lines.append(f"_\\.\\.\\. 還有 {len(new_trades)-5} 筆S5_")
+        lines.append(f"_\\.\\.\\. 還有 {len(new_trades)-5} 筆_")
     for g in (new_grid_trades or [])[:3]:
         q = _esc(str(g.get("question", ""))[:40])
         bl = g.get("buy_limit", 0)
@@ -212,6 +249,16 @@ def send_signal_alert(new_trades: list, state: dict, new_grid_trades: list | Non
         bet = g.get("bet_usdc", 0)
         lines.append(
             f"• 🔲 BUY@`{bl:.3f}` SELL@`{sl:.3f}` \\| `${bet:.2f}`\n"
+            f"  _{q}_"
+        )
+    for s in (new_sniper_trades or [])[:3]:
+        q = _esc(str(s.get("question", ""))[:40])
+        side = s.get("side", "")
+        price = s.get("price", 0)
+        h = s.get("hours_to_expiry", 0)
+        h_str = _esc(f"{h:+.0f}h") if h < 0 else _esc(f"{h:.0f}h")
+        lines.append(
+            f"• 🎯 `{side}` @ `{price:.3f}` \\| {h_str} left\n"
             f"  _{q}_"
         )
     lines.append(f"\n💰 虛擬餘額　`${bankroll:.2f}`")
