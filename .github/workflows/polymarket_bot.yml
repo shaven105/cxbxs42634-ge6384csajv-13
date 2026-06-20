@@ -78,7 +78,7 @@ jobs:
   paper_scan:
     name: "Intraday Paper Scan"
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     # Skip 15:00 UTC (daily report) and 00:30 UTC (strategy review) slots
     if: >
       github.event_name == 'schedule' &&
@@ -117,11 +117,14 @@ jobs:
         env:
           PAPER_ESTIMATOR: free
           SEND_DAILY_REPORT: "false"
+          MONTHLY_SCAN_LIMIT: ${{ vars.MONTHLY_SCAN_LIMIT || '1200' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd polymarket_bot
+          python run_paper_trade.py
+          sleep 120
           python run_paper_trade.py
 
       - name: Save paper trade state
