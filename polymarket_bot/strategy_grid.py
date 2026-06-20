@@ -26,17 +26,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+
 logger = logging.getLogger(__name__)
 
 # ── Strategy parameters ────────────────────────────────────────────────────
-GRID_MID_MIN = 0.35       # only grid markets in this probability range
-GRID_MID_MAX = 0.65
+GRID_MID_MIN = 0.42       # tightened: true coin-flip only (was 0.35)
+GRID_MID_MAX = 0.58       # tightened: true coin-flip only (was 0.65)
 GRID_OFFSET = 0.015       # place orders 1.5% either side of mid
 GRID_MIN_SPREAD = 0.010   # skip if spread < 1.0% (not enough room)
-GRID_MAX_SPREAD = 0.200   # skip if spread > 20% (too illiquid, directional risk)
+GRID_MAX_SPREAD = 0.080   # tightened: skip illiquid (was 0.200)
 GRID_STOP_BAND = 0.20     # stop-loss if price moves ±20% from entry mid
 GRID_BET_FRACTION = 0.03  # 3% of bankroll per grid pair (buy + sell)
 GRID_MIN_BET = 0.10
+GRID_MIN_DAYS_TO_EXPIRY = 14  # skip markets resolving within 2 weeks (price converges, not oscillates)
+GRID_FEE_RATE = 0.018     # Polymarket taker fee as of March 2026 (was 0.02)
 
 STATE_FILE = Path("grid_trades.json")
 
@@ -73,12 +76,41 @@ def save_grid_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+def _days_to_expiry(market: dict) -> float | None:
+    """Return days until market end date, or None if unparseable."""
+    for key in ("endDate", "endDateIso", "end_date_iso"):
+        raw = market.get(key)
+        if not raw:
+            continue
+        try:
+            if isinstance(raw, (int, float)):
+                end_dt = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            else:
+                s = str(raw).strip().rstrip("Z")
+                if "T" in s:
+                    end_dt = datetime.fromisoformat(s)
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                else:
+                    end_dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return (end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
+        except Exception:
+            continue
+    return None
+
+
 def is_grid_candidate(market: dict) -> bool:
-    """True if market is in coin-flip range with a decent but not extreme spread."""
+    """True if market is a genuine coin-flip with enough time left to oscillate."""
     mid = market.get("_mid_price", 0)
     spread = market.get("_best_ask", 0) - market.get("_best_bid", 0)
-    return (GRID_MID_MIN <= mid <= GRID_MID_MAX
-            and GRID_MIN_SPREAD <= spread <= GRID_MAX_SPREAD)
+    if not (GRID_MID_MIN <= mid <= GRID_MID_MAX
+            and GRID_MIN_SPREAD <= spread <= GRID_MAX_SPREAD):
+        return False
+    # Markets close to expiry will converge to 0/1, not oscillate — skip them
+    days = _days_to_expiry(market)
+    if days is not None and days < GRID_MIN_DAYS_TO_EXPIRY:
+        return False
+    return True
 
 
 def open_grid(market: dict, bankroll: float) -> Optional[GridTrade]:
@@ -125,7 +157,7 @@ def check_grid_updates(state: dict, markets_by_id: dict, bankroll_ref: list) -> 
     Returns list of closed trade dicts with pnl_usdc filled in.
     """
     closed_trades = []
-    fee_rate = 0.02
+    fee_rate = GRID_FEE_RATE
 
     for t in state["trades"]:
         if t.get("closed"):

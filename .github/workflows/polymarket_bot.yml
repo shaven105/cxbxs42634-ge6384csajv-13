@@ -49,9 +49,9 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
-          key: paper-state-${{ github.run_id }}
+          key: paper-state-v2-${{ github.run_id }}
           restore-keys: |
-            paper-state-
+            paper-state-v2-
 
       - name: Run paper trade + send Telegram daily report
         env:
@@ -72,13 +72,13 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
-          key: paper-state-${{ github.run_id }}
+          key: paper-state-v2-${{ github.run_id }}
 
   # ── Job 2: Intraday scan every 5 min ─────────────────────────────────────────
   paper_scan:
     name: "Intraday Paper Scan"
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     # Skip 15:00 UTC (daily report) and 00:30 UTC (strategy review) slots
     if: >
       github.event_name == 'schedule' &&
@@ -109,19 +109,22 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
-          key: paper-state-${{ github.run_id }}
+          key: paper-state-v2-${{ github.run_id }}
           restore-keys: |
-            paper-state-
+            paper-state-v2-
 
       - name: Scan markets + alert on new signals
         env:
           PAPER_ESTIMATOR: free
           SEND_DAILY_REPORT: "false"
+          MONTHLY_SCAN_LIMIT: ${{ vars.MONTHLY_SCAN_LIMIT || '1200' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd polymarket_bot
+          python run_paper_trade.py
+          sleep 120
           python run_paper_trade.py
 
       - name: Save paper trade state
@@ -132,7 +135,7 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
-          key: paper-state-${{ github.run_id }}
+          key: paper-state-v2-${{ github.run_id }}
 
   # ── Job 3: Daily strategy review (00:30 UTC = 08:30 Taiwan) ─────────────────
   strategy_review:
@@ -162,9 +165,9 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
-          key: paper-state-${{ github.run_id }}
+          key: paper-state-v2-${{ github.run_id }}
           restore-keys: |
-            paper-state-
+            paper-state-v2-
 
       - name: Run strategy review
         env:
@@ -188,7 +191,7 @@ jobs:
             polymarket_bot/paper_trades.json
             polymarket_bot/grid_trades.json
             polymarket_bot/sniper_trades.json
-          key: paper-state-${{ github.run_id }}
+          key: paper-state-v2-${{ github.run_id }}
 
   # ── Job 4: Live scan — uncomment when POLYMARKET_PRIVATE_KEY is ready ────────
   # live_scan:
