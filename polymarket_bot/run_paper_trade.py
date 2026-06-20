@@ -51,6 +51,15 @@ ESTIMATOR_MODE = os.environ.get("PAPER_ESTIMATOR", "free").lower()
 # SEND_DAILY_REPORT=false → intraday scan mode (no full report, only signal alerts)
 SEND_DAILY_REPORT = os.environ.get("SEND_DAILY_REPORT", "true").lower() == "true"
 
+# ── Capital protection thresholds ─────────────────────────────────────────────
+# With only $50, running multiple long-horizon strategies simultaneously burns
+# runway before any returns materialise. Gate strategies by remaining capital:
+#   > $30 (60%): all 3 strategies active
+#   $20–30 (40–60%): suspend Grid (S2) — long lock-up, high noise
+#   < $20 (40%): suspend S5 + Grid, keep only Sniper (S3, 48h cycle, 97% WR)
+CAPITAL_GATE_GRID = 30.0   # suspend Grid below this balance
+CAPITAL_GATE_S5   = 20.0   # suspend S5 below this balance
+
 # ── Legal exclusion: Taiwan politics / elections ──────────────────────────────
 # Blocked for legal compliance — do not trade on these markets.
 _TW_BLOCKED_KEYWORDS = {
@@ -197,37 +206,43 @@ def main() -> None:
     bankroll = state["virtual_bankroll"]
     new_trades = []
 
-    for market in tradeable:
-        if bankroll <= 1.0:
-            logger.warning("Virtual bankroll too low — stopping paper scan")
-            break
-
-        fair = get_fair_probability(market, tracker)
-        if fair is None:
-            continue
-
-        signal = evaluate_market(market, fair, bankroll)
-        if signal is None:
-            continue
-
-        if is_already_open(state, signal.market_id):
-            continue  # already have a position on this market
-
-        trade = PaperTrade(
-            date=today,
-            market_id=signal.market_id,
-            question=signal.market_question,
-            category=market.get("category", ""),
-            side=signal.side_label,
-            price=signal.market_price,
-            fair_prob=signal.fair_prob,
-            edge=signal.edge,
-            bet_usdc=round(signal.bet_usdc, 2),
-            shares=round(signal.bet_usdc / signal.market_price, 2),
+    if bankroll < CAPITAL_GATE_S5:
+        logger.warning(
+            f"Balance ${bankroll:.2f} < ${CAPITAL_GATE_S5} capital gate — "
+            f"S5 suspended. Only S3 Sniper active."
         )
-        record_paper_trade(state, trade)
-        new_trades.append(trade.__dict__)
-        bankroll = state["virtual_bankroll"]
+    else:
+        for market in tradeable:
+            if bankroll <= 1.0:
+                logger.warning("Virtual bankroll too low — stopping paper scan")
+                break
+
+            fair = get_fair_probability(market, tracker)
+            if fair is None:
+                continue
+
+            signal = evaluate_market(market, fair, bankroll)
+            if signal is None:
+                continue
+
+            if is_already_open(state, signal.market_id):
+                continue  # already have a position on this market
+
+            trade = PaperTrade(
+                date=today,
+                market_id=signal.market_id,
+                question=signal.market_question,
+                category=market.get("category", ""),
+                side=signal.side_label,
+                price=signal.market_price,
+                fair_prob=signal.fair_prob,
+                edge=signal.edge,
+                bet_usdc=round(signal.bet_usdc, 2),
+                shares=round(signal.bet_usdc / signal.market_price, 2),
+            )
+            record_paper_trade(state, trade)
+            new_trades.append(trade.__dict__)
+            bankroll = state["virtual_bankroll"]
 
     logger.info(
         f"S5: {len(new_trades)} new signals | "
@@ -246,16 +261,22 @@ def main() -> None:
             logger.info(f"  [GRID] {g['question'][:50]} | P&L: {g['pnl_usdc']:+.4f}")
 
     new_grid_trades = []
-    for market in tradeable:
-        if not is_grid_candidate(market):
-            continue
-        if is_already_gridded(grid_state, market.get("id", "")):
-            continue
-        grid_signal = open_grid(market, grid_bankroll[0])
-        if grid_signal is None:
-            continue
-        record_grid_trade(grid_state, grid_signal, grid_bankroll)
-        new_grid_trades.append(grid_signal.__dict__ if hasattr(grid_signal, '__dict__') else vars(grid_signal))
+    if grid_bankroll[0] < CAPITAL_GATE_GRID:
+        logger.warning(
+            f"Balance ${grid_bankroll[0]:.2f} < ${CAPITAL_GATE_GRID} capital gate — "
+            f"Grid suspended. No new positions opened."
+        )
+    else:
+        for market in tradeable:
+            if not is_grid_candidate(market):
+                continue
+            if is_already_gridded(grid_state, market.get("id", "")):
+                continue
+            grid_signal = open_grid(market, grid_bankroll[0])
+            if grid_signal is None:
+                continue
+            record_grid_trade(grid_state, grid_signal, grid_bankroll)
+            new_grid_trades.append(grid_signal.__dict__ if hasattr(grid_signal, '__dict__') else vars(grid_signal))
 
     state["virtual_bankroll"] = grid_bankroll[0]
 
