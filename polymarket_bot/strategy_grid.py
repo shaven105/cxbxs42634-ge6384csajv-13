@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ── Strategy parameters ────────────────────────────────────────────────────
 GRID_MID_MIN = 0.35       # only grid markets in this probability range
 GRID_MID_MAX = 0.65
-GRID_OFFSET = 0.015       # place orders 1.5% either side of mid
+GRID_OFFSET = 0.025       # place orders 1.5% either side of mid
 GRID_MIN_SPREAD = 0.010   # skip if spread < 1.0% (not enough room)
 GRID_MAX_SPREAD = 0.200   # skip if spread > 20% (too illiquid, directional risk)
 GRID_STOP_BAND = 0.20     # stop-loss if price moves ±20% from entry mid
