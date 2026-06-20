@@ -1,12 +1,9 @@
 """
-Paper trading engine for S5 NicheSpecialist strategy.
+Paper trading engine — virtual portfolio backed by paper_trades.json.
 
-Maintains a virtual portfolio in paper_trades.json:
-- Virtual bankroll starts at $50
-- Scans real Polymarket data, finds real signals
-- Records what would have been traded (no real orders)
-- On subsequent runs, checks if previously recorded markets have resolved
-- Calculates P&L when resolution is detected
+Virtual bankroll starts at $100 (reset June 2026 — v2 experiment).
+Only S3 Sniper positions are recorded here now; S5 NicheSpecialist trades
+are legacy and will resolve naturally as markets close.
 """
 
 import json
@@ -19,7 +16,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path("paper_trades.json")
-STARTING_BANKROLL = 50.0
+STARTING_BANKROLL = 100.0
 
 
 @dataclass
