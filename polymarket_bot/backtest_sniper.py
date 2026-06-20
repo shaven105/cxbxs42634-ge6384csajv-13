@@ -204,9 +204,10 @@ def run_real_backtest() -> bool:
             continue
 
         live_price = float(live_price_raw)
-        outcome = _verify_crypto_outcome(live_price, threshold, direction)
-        if not outcome:
+        verified = _verify_crypto_outcome(live_price, threshold, direction)
+        if not verified:
             continue  # live price too close to threshold to verify
+        outcome, _confidence = verified
 
         # Find the entry point in price history
         entry_window = end_ts - 48 * 3600

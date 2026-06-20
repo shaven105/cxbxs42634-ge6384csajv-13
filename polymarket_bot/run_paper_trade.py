@@ -3,20 +3,18 @@ Daily paper trading runner — called by GitHub Actions.
 
 Flow:
   1. Fetch real Polymarket markets (Gamma API)
-  2. Check if any previously recorded markets have resolved → update P&L
-  3. Run S5 NicheSpecialist strategy on today's markets → record new signals
-  4. Send HTML email report
+  2. Resolve any open S5/S2/S3 positions → update P&L
+  3. Run S3 Sniper v3 (Kelly-sized, crypto + sports verified) → record new signals
+  4. Send Telegram report
   5. Save updated state
 
-Estimator modes (set PAPER_ESTIMATOR env var):
-  "free"   (default) — bias-corrected mid-price heuristic, zero Claude cost
-  "claude"           — real Claude API calls (~$0.65–2/day)
+S5 (NicheSpecialist) and S2 (Grid) new entries are permanently suspended.
+All capital is allocated to S3 Sniper targeting MoM 20% returns.
+Existing open S5/S2 positions continue to resolve normally.
 """
 
-import json
 import logging
 import os
-import random
 from datetime import datetime, timezone
 
 logging.basicConfig(
@@ -28,37 +26,18 @@ logger = logging.getLogger("paper_trade")
 
 # ── Import bot modules ──────────────────────────────────────────────────────
 
-from scanner import fetch_active_markets, filter_markets
-from strategy import evaluate_market
-from tracker import Tracker
-from paper_trader import (
-    load_state, save_state, check_resolutions,
-    record_paper_trade, is_already_open, PaperTrade, STARTING_BANKROLL,
-)
-from strategy_grid import (
-    load_grid_state, save_grid_state, is_grid_candidate,
-    is_already_gridded, open_grid, record_grid_trade, check_grid_updates,
-)
+from scanner import fetch_active_markets
+from paper_trader import load_state, save_state, check_resolutions
+from strategy_grid import load_grid_state, save_grid_state, check_grid_updates
 from strategy_sniper import (
-    load_sniper_state, save_sniper_state, is_already_sniped,
+    load_sniper_state, save_sniper_state,
     find_sniper_candidates, record_sniper_trade, check_sniper_resolutions,
-    fetch_crypto_prices,
+    fetch_crypto_prices, fetch_sports_results,
 )
 from telegram_reporter import send_daily_report, send_signal_alert
 
-NICHE_CATEGORIES = {"weather", "science", "entertainment"}
-ESTIMATOR_MODE = os.environ.get("PAPER_ESTIMATOR", "free").lower()
 # SEND_DAILY_REPORT=false → intraday scan mode (no full report, only signal alerts)
 SEND_DAILY_REPORT = os.environ.get("SEND_DAILY_REPORT", "true").lower() == "true"
-
-# ── Capital protection thresholds ─────────────────────────────────────────────
-# With only $50, running multiple long-horizon strategies simultaneously burns
-# runway before any returns materialise. Gate strategies by remaining capital:
-#   > $30 (60%): all 3 strategies active
-#   $20–30 (40–60%): suspend Grid (S2) — long lock-up, high noise
-#   < $20 (40%): suspend S5 + Grid, keep only Sniper (S3, 48h cycle, 97% WR)
-CAPITAL_GATE_GRID = 30.0   # suspend Grid below this balance
-CAPITAL_GATE_S5   = 20.0   # suspend S5 below this balance
 
 # ── Legal exclusion: Taiwan politics / elections ──────────────────────────────
 # Blocked for legal compliance — do not trade on these markets.
@@ -95,81 +74,12 @@ def _is_blocked(market: dict) -> bool:
     return any(kw in text for kw in _TW_BLOCKED_KEYWORDS)
 
 
-# ── Free heuristic estimator (zero Claude cost) ──────────────────────────────
-
-def _free_estimate(market: dict) -> float:
-    """
-    Bias-corrected mid-price estimator — no API cost.
-
-    Applies two known Polymarket biases:
-    1. Favorite-longshot: prices <25% are overpriced ~4%, prices >75% underpriced ~3%
-    2. Niche market noise: extra ±3% random correction (wider mispricings expected)
-
-    This won't be as accurate as Claude but is good enough to identify
-    directional signals for observation purposes.
-    """
-    bid = float(market.get("_best_bid") or market.get("bestBid") or 0)
-    ask = float(market.get("_best_ask") or market.get("bestAsk") or 0)
-    if bid <= 0 or ask <= 0:
-        return 0.5
-    mid = (bid + ask) / 2.0
-
-    # Longshot bias correction
-    if mid < 0.25:
-        mid = min(mid + 0.04 * (0.25 - mid) / 0.25, 0.95)
-    elif mid > 0.75:
-        mid = max(mid - 0.03 * (mid - 0.75) / 0.25, 0.05)
-
-    # Niche market extra noise (wider spread = more uncertainty)
-    spread = ask - bid
-    if spread > 0.06:
-        mid += random.gauss(0, spread * 0.3)
-
-    return max(0.04, min(0.96, mid))
-
-
-def get_fair_probability(market: dict, tracker) -> float | None:
-    """Route to free heuristic or real Claude depending on PAPER_ESTIMATOR."""
-    if ESTIMATOR_MODE == "claude":
-        from valuator import estimate_fair_probability
-        return estimate_fair_probability(market, tracker)
-    return _free_estimate(market)
-
-
-# ── Fake CLOB client for paper trading (no real orders) ─────────────────────
-
-class PaperClobClient:
-    def get_balance(self):
-        state = load_state()
-        return str(state["virtual_bankroll"])
-
-
-class PaperTracker(Tracker):
-    def __init__(self, state: dict):
-        self._state = state
-        self._clob = PaperClobClient()
-        self.cumulative_claude_cost_usd = state["total_claude_cost_usd"]
-        self.realized_pnl_usdc = state["total_realized_pnl"]
-        self.open_trades = []
-        self._cached_balance = state["virtual_bankroll"]
-
-    def record_claude_usage(self, input_tokens: int, output_tokens: int) -> float:
-        cost = super().record_claude_usage(input_tokens, output_tokens)
-        self._state["total_claude_cost_usd"] = self.cumulative_claude_cost_usd
-        return cost
-
-    def get_usdc_balance(self) -> float:
-        self._cached_balance = self._state["virtual_bankroll"]
-        return self._cached_balance
-
-
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     mode = "daily report" if SEND_DAILY_REPORT else "intraday scan"
     logger.info(f"=== Paper trading run [{mode}] ===")
     state = load_state()
-    tracker = PaperTracker(state)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Step 1: Fetch markets
@@ -185,69 +95,19 @@ def main() -> None:
             result = "WIN" if t.outcome else "LOSS"
             logger.info(f"  [{result}] {t.question[:50]} | P&L: {t.pnl_usdc:+.2f}")
 
-    # Step 3: Apply legal filter then scan all markets for edge
-    # Legal filter: remove Taiwan politics/elections first
+    # Step 3: Apply legal filter
     blocked = [m for m in raw_markets if _is_blocked(m)]
     if blocked:
         logger.info(f"Blocked {len(blocked)} Taiwan politics/election markets")
     raw_markets_clean = [m for m in raw_markets if not _is_blocked(m)]
 
-    # Apply quality filter (liquidity/spread/binary) to all remaining markets.
-    # Gamma API returns empty category strings, so niche pre-filtering is dropped —
-    # the edge threshold in evaluate_market naturally selects mispriced markets.
-    tradeable = filter_markets(raw_markets_clean)
+    # S5 (NicheSpecialist) and S2 (Grid) new entries are suspended — all capital
+    # is allocated to S3 Sniper (Kelly-sized, externally verified, 97%+ WR).
+    # Resolution of existing open S5/S2 positions still runs below.
+    new_trades: list = []
     logger.info(
-        f"S5 candidates: {len(raw_markets_clean)} total → {len(tradeable)} tradeable "
-        f"[estimator={ESTIMATOR_MODE}]"
-    )
-
-    niche_raw = tradeable  # kept for compatibility with downstream logging
-
-    bankroll = state["virtual_bankroll"]
-    new_trades = []
-
-    if bankroll < CAPITAL_GATE_S5:
-        logger.warning(
-            f"Balance ${bankroll:.2f} < ${CAPITAL_GATE_S5} capital gate — "
-            f"S5 suspended. Only S3 Sniper active."
-        )
-    else:
-        for market in tradeable:
-            if bankroll <= 1.0:
-                logger.warning("Virtual bankroll too low — stopping paper scan")
-                break
-
-            fair = get_fair_probability(market, tracker)
-            if fair is None:
-                continue
-
-            signal = evaluate_market(market, fair, bankroll)
-            if signal is None:
-                continue
-
-            if is_already_open(state, signal.market_id):
-                continue  # already have a position on this market
-
-            trade = PaperTrade(
-                date=today,
-                market_id=signal.market_id,
-                question=signal.market_question,
-                category=market.get("category", ""),
-                side=signal.side_label,
-                price=signal.market_price,
-                fair_prob=signal.fair_prob,
-                edge=signal.edge,
-                bet_usdc=round(signal.bet_usdc, 2),
-                shares=round(signal.bet_usdc / signal.market_price, 2),
-            )
-            record_paper_trade(state, trade)
-            new_trades.append(trade.__dict__)
-            bankroll = state["virtual_bankroll"]
-
-    logger.info(
-        f"S5: {len(new_trades)} new signals | "
-        f"Balance: ${state['virtual_bankroll']:.2f} | "
-        f"Claude cost: ${state['total_claude_cost_usd']:.4f}"
+        f"S5 suspended (MoM 20% target via S3 only) | "
+        f"Balance: ${state['virtual_bankroll']:.2f}"
     )
 
     # Step 4: S2 Grid strategy scan
@@ -260,28 +120,12 @@ def main() -> None:
         for g in closed_grids:
             logger.info(f"  [GRID] {g['question'][:50]} | P&L: {g['pnl_usdc']:+.4f}")
 
-    new_grid_trades = []
-    if grid_bankroll[0] < CAPITAL_GATE_GRID:
-        logger.warning(
-            f"Balance ${grid_bankroll[0]:.2f} < ${CAPITAL_GATE_GRID} capital gate — "
-            f"Grid suspended. No new positions opened."
-        )
-    else:
-        for market in tradeable:
-            if not is_grid_candidate(market):
-                continue
-            if is_already_gridded(grid_state, market.get("id", "")):
-                continue
-            grid_signal = open_grid(market, grid_bankroll[0])
-            if grid_signal is None:
-                continue
-            record_grid_trade(grid_state, grid_signal, grid_bankroll)
-            new_grid_trades.append(grid_signal.__dict__ if hasattr(grid_signal, '__dict__') else vars(grid_signal))
-
+    # Grid new entries suspended — only resolving existing positions
+    new_grid_trades: list = []
     state["virtual_bankroll"] = grid_bankroll[0]
 
     logger.info(
-        f"Grid: {len(new_grid_trades)} new positions | "
+        f"Grid suspended (S2 new entries off) | "
         f"Total P&L: ${grid_state['total_pnl']:+.4f}"
     )
 
@@ -294,10 +138,12 @@ def main() -> None:
     if closed_snipers:
         logger.info(f"Sniper: {len(closed_snipers)} positions resolved")
 
-    # Fetch crypto prices once for all sniper candidates
+    # Fetch external price/result data for S3 Sniper verification
     crypto_prices = fetch_crypto_prices()
     if crypto_prices:
         logger.info(f"Crypto prices fetched: {list(crypto_prices.keys())}")
+
+    sports_results = fetch_sports_results()
 
     # Scan all legal markets (not just tradeable) to catch more near-expiry candidates
     new_sniper_trades = []
@@ -306,6 +152,7 @@ def main() -> None:
         bankroll=sniper_bankroll[0],
         sniper_state=sniper_state,
         crypto_prices=crypto_prices,
+        sports_results=sports_results,
     )
     for signal in sniper_candidates:
         if sniper_bankroll[0] < signal.bet_usdc:
