@@ -80,6 +80,92 @@ jobs:
             polymarket_bot/sniper_trades.json
           key: paper-state-v2-${{ github.run_id }}
 
+      - name: Commit daily performance snapshot to repo
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DEPLOY_BRANCH: ${{ env.DEPLOY_BRANCH }}
+        run: |
+          python - <<'EOF'
+          import json, os, urllib.request, base64
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          # Build summary from state files
+          def load(p):
+              try: return json.loads(Path(p).read_text())
+              except: return {}
+
+          sniper = load("polymarket_bot/sniper_trades.json")
+          paper  = load("polymarket_bot/paper_trades.json")
+          trades = sniper.get("trades", [])
+          resolved = [t for t in trades if t.get("resolved")]
+          open_t   = [t for t in trades if not t.get("resolved")]
+          wins     = sum(1 for t in resolved if t.get("pnl_usdc", 0) > 0)
+
+          summary = {
+            "updated":       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "bankroll":      round(paper.get("virtual_bankroll", 0), 4),
+            "start_bankroll":paper.get("start_bankroll", 100),
+            "sniper": {
+              "n_open":     len(open_t),
+              "n_resolved": len(resolved),
+              "n_wins":     wins,
+              "win_rate":   round(wins/len(resolved)*100, 1) if resolved else 0,
+              "total_pnl":  round(sniper.get("total_pnl", 0), 4),
+              "no_signal_streak": sniper.get("_review_meta", {}).get("no_signal_streak", 0),
+              "open_trades": [
+                {"question": t.get("question","")[:80],
+                 "side": t.get("side"), "price": t.get("price"),
+                 "confidence": t.get("confidence"),
+                 "hours_to_expiry": t.get("hours_to_expiry"),
+                 "reason": t.get("reason")}
+                for t in open_t
+              ],
+              "recent_resolved": [
+                {"question": t.get("question","")[:80],
+                 "side": t.get("side"), "won": t.get("outcome"),
+                 "pnl": t.get("pnl_usdc"), "confidence": t.get("confidence"),
+                 "reason": t.get("reason")}
+                for t in sorted(resolved, key=lambda x: x.get("date",""), reverse=True)[:10]
+              ],
+            }
+          }
+
+          content = json.dumps(summary, indent=2, ensure_ascii=False)
+
+          # Commit via GitHub API
+          repo    = os.environ["GITHUB_REPOSITORY"]
+          branch  = os.environ["DEPLOY_BRANCH"]
+          token   = os.environ["GITHUB_TOKEN"]
+          api     = f"https://api.github.com/repos/{repo}"
+          headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          }
+          path = "performance_snapshot.json"
+          url  = f"{api}/contents/{path}?ref={branch}"
+          try:
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  old = json.loads(r.read())
+              sha = old["sha"]
+          except: sha = None
+
+          body = {"message": f"perf: daily snapshot {summary['updated']}",
+                  "content": base64.b64encode(content.encode()).decode(),
+                  "branch": branch}
+          if sha: body["sha"] = sha
+          req = urllib.request.Request(
+              f"{api}/contents/{path}",
+              data=json.dumps(body).encode(), headers=headers, method="PUT")
+          with urllib.request.urlopen(req, timeout=15) as r:
+              print("Snapshot committed:", json.loads(r.read()).get("commit",{}).get("sha",""))
+          EOF
+
   # ── Job 2: Intraday scan every 5 min ─────────────────────────────────────────
   paper_scan:
     name: "Intraday Paper Scan"
