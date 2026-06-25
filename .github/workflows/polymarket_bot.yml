@@ -19,6 +19,10 @@ on:
         required: false
         default: "no"
 
+# The branch all jobs check out from.  The reviewer also auto-PRs against this branch.
+env:
+  DEPLOY_BRANCH: claude/polymarket-tradebot-plan-j2tvbf
+
 jobs:
 
   # ── Job 1: Daily paper trading report (23:00 Taiwan time = 15:00 UTC) ────────
@@ -33,6 +37,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
 
       - uses: actions/setup-python@v5
         with:
@@ -93,6 +99,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
 
       - uses: actions/setup-python@v5
         with:
@@ -141,7 +149,7 @@ jobs:
   strategy_review:
     name: "Daily Strategy Review"
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.force_review == 'yes') ||
       (github.event_name == 'schedule' &&
@@ -149,6 +157,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
 
       - uses: actions/setup-python@v5
         with:
@@ -169,14 +179,15 @@ jobs:
           restore-keys: |
             paper-state-v2-
 
-      - name: Run strategy review
+      - name: Run strategy review (auto-tune + Telegram report)
         env:
-          REVIEWER_USE_CLAUDE: "false"
+          REVIEWER_USE_CLAUDE: "true"
+          REVIEWER_AUTO_PR: "true"
+          REVIEWER_AUTO_MERGE: "true"
+          DEPLOY_BRANCH: ${{ env.DEPLOY_BRANCH }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          REVIEWER_AUTO_PR: "true"
-          REVIEWER_AUTO_MERGE: ${{ vars.AUTO_MERGE_PARAM_PR || 'false' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
