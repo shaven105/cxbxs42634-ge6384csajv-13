@@ -15,6 +15,12 @@ Two verified signal types:
     Market expires within 6 hours, current crypto price ≈ final price.
     Small time discount applied to confidence.  Kelly cap: 20%.
 
+  Tier 2b — Weather Verified (≤3 days to target date)
+    Open-Meteo daily-high forecast compared to the temperature threshold
+    in the question.  Confidence = N(margin_°F / forecast_std_°F) where
+    std grows from 2.5°F (same day) to 9°F (3 days out).  No API key
+    needed — Open-Meteo is fully free.  Kelly cap: 20%.
+
   Tier 3 — Sports Verified (any open market)
     ESPN confirms the game is completed and we match the winner to the
     Polymarket question.  No time restriction — game completion IS the
@@ -102,6 +108,98 @@ _CRYPTO_VOL_ANNUAL: dict[str, float] = {
     "LTC":   0.90,
 }
 
+# ── Weather constants ──────────────────────────────────────────────────────
+
+WEATHER_MAX_DAYS_AHEAD = 3        # only enter if target date ≤3 days away
+WEATHER_MIN_CONFIDENCE = 0.88     # Open-Meteo margin must give this confidence
+
+_OPEN_METEO_FORECAST_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude={lat}&longitude={lon}"
+    "&daily=temperature_2m_max&temperature_unit=fahrenheit"
+    "&forecast_days=7&timezone=auto"
+)
+_OPEN_METEO_ARCHIVE_URL = (
+    "https://archive-api.open-meteo.com/v1/archive"
+    "?latitude={lat}&longitude={lon}&start_date={date}&end_date={date}"
+    "&daily=temperature_2m_max&temperature_unit=fahrenheit&timezone=auto"
+)
+
+# Forecast uncertainty (°F std dev) by days ahead; negative = actual (archive)
+_WEATHER_STD_F: dict[int, float] = {-1: 0.5, 0: 2.5, 1: 4.0, 2: 6.5, 3: 9.0}
+
+# In-process cache to avoid redundant API calls within one scan
+_weather_cache: dict[tuple, float] = {}
+
+# Major US cities tracked on Polymarket weather markets (lat, lon)
+_CITY_COORDS: dict[str, tuple[float, float]] = {
+    "new york city":   (40.7128, -74.0060),
+    "new york":        (40.7128, -74.0060),
+    "nyc":             (40.7128, -74.0060),
+    "los angeles":     (34.0522, -118.2437),
+    "chicago":         (41.8781, -87.6298),
+    "houston":         (29.7604, -95.3698),
+    "phoenix":         (33.4484, -112.0740),
+    "philadelphia":    (39.9526, -75.1652),
+    "san antonio":     (29.4241, -98.4936),
+    "san diego":       (32.7157, -117.1611),
+    "dallas":          (32.7767, -96.7970),
+    "san jose":        (37.3382, -121.8863),
+    "austin":          (30.2672, -97.7431),
+    "san francisco":   (37.7749, -122.4194),
+    "seattle":         (47.6062, -122.3321),
+    "denver":          (39.7392, -104.9903),
+    "washington":      (38.9072, -77.0369),
+    "nashville":       (36.1627, -86.7816),
+    "oklahoma city":   (35.4676, -97.5164),
+    "boston":          (42.3601, -71.0589),
+    "portland":        (45.5051, -122.6750),
+    "las vegas":       (36.1699, -115.1398),
+    "memphis":         (35.1495, -90.0490),
+    "louisville":      (38.2527, -85.7585),
+    "baltimore":       (39.2904, -76.6122),
+    "milwaukee":       (43.0389, -87.9065),
+    "albuquerque":     (35.0844, -106.6504),
+    "tucson":          (32.2226, -110.9747),
+    "fresno":          (36.7378, -119.7871),
+    "sacramento":      (38.5816, -121.4944),
+    "miami":           (25.7617, -80.1918),
+    "atlanta":         (33.7490, -84.3880),
+    "minneapolis":     (44.9778, -93.2650),
+    "new orleans":     (29.9511, -90.0715),
+    "cleveland":       (41.4993, -81.6944),
+    "pittsburgh":      (40.4406, -79.9959),
+    "st. louis":       (38.6270, -90.1994),
+    "st louis":        (38.6270, -90.1994),
+    "tampa":           (27.9506, -82.4572),
+    "orlando":         (28.5383, -81.3792),
+    "detroit":         (42.3314, -83.0458),
+    "kansas city":     (39.0997, -94.5786),
+    "raleigh":         (35.7796, -78.6382),
+    "omaha":           (41.2565, -95.9345),
+    "charlotte":       (35.2271, -80.8431),
+    "jacksonville":    (30.3322, -81.6557),
+    "indianapolis":    (39.7684, -86.1581),
+    "columbus":        (39.9612, -82.9988),
+    "el paso":         (31.7619, -106.4850),
+    "fort worth":      (32.7555, -97.3308),
+}
+
+_WEATHER_TEMP_RE = re.compile(r'\b(\d+(?:\.\d+)?)\s*°?\s*[Ff]\b')
+_WEATHER_MONTH_DAY_RE = re.compile(
+    r'\b(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|'
+    r'jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+    r'\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?\b',
+    re.I
+)
+_WEATHER_DOW_RE = re.compile(
+    r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', re.I
+)
+_MONTH_NAMES: dict[str, int] = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
 CRYPTO_MAP: dict[str, tuple[str, str, re.Pattern]] = {
     "BTC":   ("bitcoin",       "BTC-USD",   re.compile(r'\b(?:btc|bitcoin)\b',        re.I)),
     "ETH":   ("ethereum",      "ETH-USD",   re.compile(r'\b(?:eth|ethereum)\b',       re.I)),
@@ -119,7 +217,7 @@ CRYPTO_MAP: dict[str, tuple[str, str, re.Pattern]] = {
 
 _PRICE_RE = re.compile(r'\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM]?)')
 _ABOVE_RE = re.compile(
-    r'\b(?:above|over|exceed|reaches?|hits?|surpasses?|breaks?|crosses?|at or above)\b', re.I
+    r'\b(?:above|over|exceed|reach(?:es)?|hit(?:s)?|surpass(?:es)?|break(?:s)?|cross(?:es)?|at or above)\b', re.I
 )
 _BELOW_RE = re.compile(
     r'\b(?:below|under|falls?\s+(?:below|under)|drops?\s+(?:below|under)|at or below)\b', re.I
@@ -418,6 +516,142 @@ def _check_sports_question(
     return None
 
 
+# ── Weather forecast fetching & verification ──────────────────────────────
+
+def _parse_weather_question(
+    question: str, now: datetime
+) -> tuple[str, float, str, str] | None:
+    """
+    Parse a Polymarket daily-high temperature question.
+    Returns (city_key, threshold_f, direction, target_date_iso) or None.
+    """
+    q = question.lower()
+
+    temp_m = _WEATHER_TEMP_RE.search(question)
+    if not temp_m:
+        return None
+
+    threshold_f = float(temp_m.group(1))
+    if not (20 <= threshold_f <= 130):
+        return None
+
+    if _ABOVE_RE.search(q):
+        direction = "above"
+    elif _BELOW_RE.search(q):
+        direction = "below"
+    else:
+        return None
+
+    # Longest match first: "new york city" before "new york"
+    city_key = None
+    for candidate in sorted(_CITY_COORDS, key=len, reverse=True):
+        if candidate in q:
+            city_key = candidate
+            break
+    if city_key is None:
+        return None
+
+    month_m = _WEATHER_MONTH_DAY_RE.search(question)
+    if month_m:
+        mon_str = month_m.group("month").lower()[:3]
+        month   = _MONTH_NAMES[mon_str]
+        day     = int(month_m.group("day"))
+        try:
+            target = datetime(now.year, month, day, tzinfo=timezone.utc)
+            if target < now - timedelta(days=2):
+                target = datetime(now.year + 1, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    else:
+        dow_m = _WEATHER_DOW_RE.search(question)
+        if not dow_m:
+            return None
+        dow_map = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                   "friday": 4, "saturday": 5, "sunday": 6}
+        target_dow  = dow_map[dow_m.group(1).lower()]
+        current_dow = now.weekday()
+        days_ahead  = (target_dow - current_dow) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        target = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
+
+    return city_key, threshold_f, direction, target.strftime("%Y-%m-%d")
+
+
+def _fetch_weather_high(city_key: str, target_date_iso: str) -> float | None:
+    """
+    Fetch the daily high temperature (°F) from Open-Meteo.
+    Uses forecast API for today/future dates, archive API for past dates.
+    Results cached in-process.
+    """
+    lat, lon = _CITY_COORDS[city_key]
+    cache_key = (lat, lon, target_date_iso)
+    if cache_key in _weather_cache:
+        return _weather_cache[cache_key]
+
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if target_date_iso < today_iso:
+        url = _OPEN_METEO_ARCHIVE_URL.format(lat=lat, lon=lon, date=target_date_iso)
+    else:
+        url = _OPEN_METEO_FORECAST_URL.format(lat=lat, lon=lon)
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "polymarket-bot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:
+        logger.warning(f"Open-Meteo fetch failed for {city_key}/{target_date_iso}: {exc}")
+        return None
+
+    daily = data.get("daily") or {}
+    dates = daily.get("time") or []
+    highs = daily.get("temperature_2m_max") or []
+
+    if target_date_iso in dates:
+        idx = dates.index(target_date_iso)
+        if idx < len(highs) and highs[idx] is not None:
+            high_f = float(highs[idx])
+            _weather_cache[cache_key] = high_f
+            return high_f
+
+    return None
+
+
+def _weather_confidence(
+    forecast_high_f: float,
+    threshold_f: float,
+    direction: str,
+    days_until: int,
+) -> float:
+    """P(YES outcome) = N(margin_°F / std_°F) where std grows with forecast horizon."""
+    std_f  = _WEATHER_STD_F.get(max(days_until, -1), 9.0)
+    margin = (forecast_high_f - threshold_f if direction == "above"
+              else threshold_f - forecast_high_f)
+    return _norm_cdf(margin / std_f)
+
+
+def _verify_weather_outcome(
+    city_key: str,
+    threshold_f: float,
+    direction: str,
+    target_date_iso: str,
+    days_until: int,
+) -> tuple[str, float] | None:
+    """
+    Fetch Open-Meteo and return (side, confidence) when the forecast clearly
+    calls the outcome.  Returns None when too close to call.
+    """
+    forecast_f = _fetch_weather_high(city_key, target_date_iso)
+    if forecast_f is None:
+        return None
+    conf = _weather_confidence(forecast_f, threshold_f, direction, days_until)
+    if conf >= WEATHER_MIN_CONFIDENCE:
+        return "YES", conf
+    if 1.0 - conf >= WEATHER_MIN_CONFIDENCE:
+        return "NO", round(1.0 - conf, 4)
+    return None
+
+
 # ── Date parsing ───────────────────────────────────────────────────────────
 
 def _parse_end_date(market: dict) -> datetime | None:
@@ -451,6 +685,7 @@ def find_sniper_candidates(
     Resolution-Lag-first scanner.  Priority:
       1. Overdue crypto (endDate passed, price unambiguous)
       2. Near-expiry crypto (< 6h, current price ≈ resolution price)
+      2b. Weather verified (Open-Meteo forecast vs °F threshold, ≤3 days)
       3. Sports verified (game completed per ESPN, market still open)
 
     markets       — Gamma API markets (after legal filter)
@@ -531,6 +766,39 @@ def find_sniper_candidates(
                                         confidence=confidence,
                                     ))
                                     entered = True
+
+        # ── Tier 2b: Weather verification ─────────────────────────────────
+        # Open-Meteo free forecast vs temperature threshold in the question.
+        # Enter for target dates from yesterday (resolution lag) to 3 days ahead.
+        if not entered:
+            parsed_w = _parse_weather_question(question, now)
+            if parsed_w is not None:
+                w_city, w_thresh, w_dir, w_date = parsed_w
+                target_dt  = datetime.strptime(w_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                today_dt   = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                days_until = (target_dt - today_dt).days
+                if -1 <= days_until <= WEATHER_MAX_DAYS_AHEAD:
+                    w_result = _verify_weather_outcome(w_city, w_thresh, w_dir, w_date, days_until)
+                    if w_result is not None:
+                        outcome, confidence = w_result
+                        entry_price = yes_ask if outcome == "YES" else round(1.0 - yes_bid, 4)
+                        if entry_price <= SNIPE_MAX_ENTRY:
+                            bet = _kelly_bet(confidence, entry_price, bankroll, SNIPE_KELLY_CAP_NEAR)
+                            if bet > 0 and bankroll >= bet:
+                                signals.append(SniperTrade(
+                                    date=now.strftime("%Y-%m-%d"),
+                                    market_id=market_id,
+                                    question=question[:120],
+                                    side=outcome,
+                                    price=entry_price,
+                                    bet_usdc=bet,
+                                    shares=round(bet / entry_price, 4),
+                                    reason="weather_verified",
+                                    hours_to_expiry=round(hours_left, 1),
+                                    threshold=w_thresh,
+                                    confidence=round(confidence, 4),
+                                ))
+                                entered = True
 
         # ── Tier 3: Sports verification ────────────────────────────────────
         # No time restriction: game completion is the signal, not endDate proximity.
