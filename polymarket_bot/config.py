@@ -14,7 +14,7 @@ GAMMA_API_BASE: str = "https://gamma-api.polymarket.com"
 CLOB_API_BASE: str = "https://clob.polymarket.com"
 
 # Anthropic
-ANTHROPIC_API_KEY: str = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL: str = "claude-sonnet-4-6"
 CLAUDE_MAX_TOKENS: int = 512
 
