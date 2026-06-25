@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import urllib.request
 from dataclasses import dataclass, asdict
@@ -66,8 +67,8 @@ SNIPE_KELLY_CAP_NEAR    = 0.20   # near-expiry (<6h): small time-price risk rema
 SNIPE_MIN_BET       = 1.00   # $1 minimum (bankroll is now $100)
 SNIPE_MAX_POSITIONS = 5
 
-# Price must be this far beyond the threshold to call the outcome
-CRYPTO_MARGIN = 0.05          # 5% margin → confidence 0.97
+# Minimum confidence (from volatility model) required to enter any trade
+CRYPTO_MIN_CONFIDENCE = 0.90
 POLYMARKET_FEE = 0.018        # Polymarket taker fee, March 2026
 
 STATE_FILE = Path("sniper_trades.json")
@@ -84,6 +85,22 @@ ESPN_SPORTS = [
     ("soccer",     "esp.1"),
     ("soccer",     "uefa.champions"),
 ]
+
+# Annualised return volatilities (rough, conservative) per asset
+_CRYPTO_VOL_ANNUAL: dict[str, float] = {
+    "BTC":   0.80,
+    "ETH":   0.80,
+    "SOL":   1.20,
+    "DOGE":  1.50,
+    "XRP":   1.20,
+    "BNB":   0.90,
+    "MATIC": 1.40,
+    "ADA":   1.20,
+    "AVAX":  1.30,
+    "LINK":  1.20,
+    "DOT":   1.20,
+    "LTC":   0.90,
+}
 
 CRYPTO_MAP: dict[str, tuple[str, str, re.Pattern]] = {
     "BTC":   ("bitcoin",       "BTC-USD",   re.compile(r'\b(?:btc|bitcoin)\b',        re.I)),
@@ -182,15 +199,33 @@ def _kelly_bet(confidence: float, ask: float, bankroll: float, kelly_cap: float)
 
 # ── Crypto price fetching & verification ──────────────────────────────────
 
-def _crypto_confidence(margin: float) -> float:
-    """Map fractional price margin beyond threshold to base confidence."""
-    if margin >= 0.20:
-        return 0.995
-    if margin >= 0.10:
-        return 0.990
-    if margin >= 0.05:
-        return 0.970
-    return 0.0
+def _norm_cdf(z: float) -> float:
+    """Standard normal CDF via Abramowitz & Stegun polynomial (no scipy needed)."""
+    if z > 8:
+        return 1.0
+    if z < -8:
+        return 0.0
+    k    = 1.0 / (1.0 + 0.2316419 * abs(z))
+    poly = k * (0.319381530 + k * (-0.356563782 + k * (1.781477937 + k * (-1.821255978 + k * 1.330274429))))
+    phi  = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+    p    = 1.0 - phi * poly
+    return p if z >= 0 else 1.0 - p
+
+
+def _crypto_confidence(margin: float, hours_remaining: float, symbol: str = "BTC") -> float:
+    """
+    P(price stays on current side until expiry) using T-hour lognormal volatility.
+
+    margin          — fractional distance of live price from threshold (>0)
+    hours_remaining — hours until market closes (use 0 for already-overdue, floored at 1 min)
+    symbol          — asset symbol for per-asset volatility lookup
+    """
+    if margin <= 0:
+        return 0.0
+    vol_annual = _CRYPTO_VOL_ANNUAL.get(symbol, 1.0)
+    h = max(hours_remaining, 1 / 60)          # floor at 1 minute
+    vol_t = vol_annual * math.sqrt(h / 8760)  # annualised → T-hour vol
+    return _norm_cdf(margin / vol_t)
 
 
 def fetch_crypto_prices() -> dict:
@@ -247,22 +282,41 @@ def _parse_crypto_question(question: str) -> tuple[str, float, str] | None:
 
 
 def _verify_crypto_outcome(
-    live_price: float, threshold: float, direction: str
+    live_price: float,
+    threshold: float,
+    direction: str,
+    hours_remaining: float = 6.0,
+    symbol: str = "BTC",
 ) -> tuple[str, float] | None:
     """
-    Return (outcome, base_confidence) when price is unambiguously past threshold.
-    None when too close to call.
+    Return (outcome, confidence) when the time-aware volatility model gives
+    confidence >= CRYPTO_MIN_CONFIDENCE.  Returns None when too close to call.
     """
+    def _conf(margin: float) -> float:
+        return _crypto_confidence(margin, hours_remaining, symbol)
+
     if direction == "above":
-        if live_price > threshold * (1 + CRYPTO_MARGIN):
-            return "YES", _crypto_confidence((live_price - threshold) / threshold)
-        if live_price < threshold * (1 - CRYPTO_MARGIN):
-            return "NO", _crypto_confidence((threshold - live_price) / threshold)
+        up_margin = (live_price - threshold) / threshold
+        if up_margin > 0:
+            c = _conf(up_margin)
+            if c >= CRYPTO_MIN_CONFIDENCE:
+                return "YES", c
+        else:
+            dn_margin = (threshold - live_price) / threshold
+            c = _conf(dn_margin)
+            if c >= CRYPTO_MIN_CONFIDENCE:
+                return "NO", c
     elif direction == "below":
-        if live_price < threshold * (1 - CRYPTO_MARGIN):
-            return "YES", _crypto_confidence((threshold - live_price) / threshold)
-        if live_price > threshold * (1 + CRYPTO_MARGIN):
-            return "NO", _crypto_confidence((live_price - threshold) / threshold)
+        dn_margin = (threshold - live_price) / threshold
+        if dn_margin > 0:
+            c = _conf(dn_margin)
+            if c >= CRYPTO_MIN_CONFIDENCE:
+                return "YES", c
+        else:
+            up_margin = (live_price - threshold) / threshold
+            c = _conf(up_margin)
+            if c >= CRYPTO_MIN_CONFIDENCE:
+                return "NO", c
     return None
 
 
@@ -451,12 +505,11 @@ def find_sniper_candidates(
                 raw_price = (crypto_prices.get(cg_id) or {}).get("usd")
                 if raw_price is not None:
                     live_price = float(raw_price)
-                    verified = _verify_crypto_outcome(live_price, threshold, direction)
+                    hours_remaining = max(0.0, hours_left)
+                    verified = _verify_crypto_outcome(live_price, threshold, direction, hours_remaining, sym)
                     if verified is not None:
-                        outcome, base_conf = verified
-                        if base_conf > 0:
-                            # Slightly discount confidence for near-expiry (price still has time to move)
-                            confidence = base_conf if is_overdue else base_conf * 0.90
+                        outcome, confidence = verified
+                        if confidence > 0:
                             kelly_cap  = SNIPE_KELLY_CAP_OVERDUE if is_overdue else SNIPE_KELLY_CAP_NEAR
                             entry_price = yes_ask if outcome == "YES" else round(1.0 - yes_bid, 4)
                             if entry_price <= SNIPE_MAX_ENTRY:

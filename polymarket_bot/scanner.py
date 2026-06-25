@@ -21,7 +21,12 @@ Market = dict[str, Any]
 def fetch_active_markets(limit: int = MAX_MARKETS_PER_SCAN) -> list[Market]:
     """
     Pages through Gamma API to collect up to `limit` active, non-closed markets.
-    Polite 200 ms pause between pages to avoid rate-limiting.
+
+    Uses `order=id&ascending=false` so the NEWEST markets (highest IDs) come first.
+    This is critical: near-expiry BTC/ETH daily-threshold markets and 5-min
+    crypto markets live at IDs 2,600,000+ while the default oldest-first sort
+    returns only legacy markets from 2021-2022 (IDs 540k-700k), completely
+    missing all short-term opportunities.
     """
     markets: list[Market] = []
     page_size = 100
@@ -36,6 +41,8 @@ def fetch_active_markets(limit: int = MAX_MARKETS_PER_SCAN) -> list[Market]:
             "closed": "false",
             "limit": page_size,
             "offset": offset,
+            "order": "id",
+            "ascending": "false",
         }
         try:
             resp = session.get(
