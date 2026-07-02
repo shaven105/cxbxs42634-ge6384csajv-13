@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-01 17:09 UTC",
+  "updated": "2026-07-02 16:46 UTC",
   "bankroll": 100.0,
   "start_bankroll": 100.0,
   "sniper": {
@@ -8,7 +8,7 @@
     "n_wins": 0,
     "win_rate": 0,
     "total_pnl": 0.0,
-    "no_signal_streak": 0,
+    "no_signal_streak": 1,
     "open_trades": [],
     "recent_resolved": []
   }
