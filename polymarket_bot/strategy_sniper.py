@@ -698,6 +698,13 @@ def find_sniper_candidates(
     signals: list[SniperTrade] = []
     open_count = sum(1 for t in sniper_state["trades"] if not t.get("resolved"))
 
+    # Diagnostic counters
+    _n_no_bid = _n_no_date = _n_stale = 0
+    _n_crypto_win = _n_crypto_skip = _n_weather_win = _n_weather_skip = 0
+    _n_sports_win = _n_sports_skip = 0
+    _crypto_samples: list[str] = []
+    _weather_samples: list[str] = []
+
     for market in markets:
         if open_count + len(signals) >= SNIPE_MAX_POSITIONS:
             break
@@ -713,16 +720,19 @@ def find_sniper_candidates(
         yes_bid = float(market.get("bestBid") or market.get("_best_bid") or 0)
         yes_ask = float(market.get("bestAsk") or market.get("_best_ask") or 0)
         if yes_bid <= 0 or yes_ask <= 0 or yes_bid >= yes_ask:
+            _n_no_bid += 1
             continue
 
         end_date = _parse_end_date(market)
         if end_date is None:
+            _n_no_date += 1
             continue
 
         hours_left = (end_date - now).total_seconds() / 3600
 
         # Drop markets too stale to trade
         if hours_left < -SNIPE_OVERDUE_GRACE:
+            _n_stale += 1
             continue
 
         question = market.get("question", "")
@@ -736,6 +746,8 @@ def find_sniper_candidates(
             parsed = _parse_crypto_question(question)
             if parsed:
                 sym, threshold, direction = parsed
+                if len(_crypto_samples) < 5:
+                    _crypto_samples.append(f"{question[:60]} [h={hours_left:.1f}]")
                 cg_id = CRYPTO_MAP[sym][0]
                 raw_price = (crypto_prices.get(cg_id) or {}).get("usd")
                 if raw_price is not None:
@@ -765,7 +777,14 @@ def find_sniper_candidates(
                                         threshold=threshold,
                                         confidence=confidence,
                                     ))
+                                    _n_crypto_win += 1
                                     entered = True
+                    else:
+                        _n_crypto_skip += 1
+                        logger.debug(
+                            f"Crypto skip: {question[:55]} | live={raw_price} "
+                            f"thresh={threshold} dir={direction} h={hours_left:.1f}"
+                        )
 
         # ── Tier 2b: Weather verification ─────────────────────────────────
         # Open-Meteo free forecast vs temperature threshold in the question.
@@ -774,6 +793,8 @@ def find_sniper_candidates(
             parsed_w = _parse_weather_question(question, now)
             if parsed_w is not None:
                 w_city, w_thresh, w_dir, w_date = parsed_w
+                if len(_weather_samples) < 5:
+                    _weather_samples.append(f"{question[:60]} [city={w_city}]")
                 target_dt  = datetime.strptime(w_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
                 today_dt   = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 days_until = (target_dt - today_dt).days
@@ -798,7 +819,10 @@ def find_sniper_candidates(
                                     threshold=w_thresh,
                                     confidence=round(confidence, 4),
                                 ))
+                                _n_weather_win += 1
                                 entered = True
+                    else:
+                        _n_weather_skip += 1
 
         # ── Tier 3: Sports verification ────────────────────────────────────
         # No time restriction: game completion is the signal, not endDate proximity.
@@ -823,6 +847,21 @@ def find_sniper_candidates(
                             hours_to_expiry=round(hours_left, 1),
                             confidence=confidence,
                         ))
+                        _n_sports_win += 1
+            else:
+                _n_sports_skip += 1
+
+    logger.info(
+        f"Scan diagnostic: markets={len(markets)} "
+        f"no_bid={_n_no_bid} no_date={_n_no_date} stale={_n_stale} | "
+        f"crypto={_n_crypto_win}win/{_n_crypto_skip}skip "
+        f"weather={_n_weather_win}win/{_n_weather_skip}skip "
+        f"sports={_n_sports_win}win/{_n_sports_skip}skip"
+    )
+    if _crypto_samples:
+        logger.info(f"Crypto candidates: {_crypto_samples}")
+    if _weather_samples:
+        logger.info(f"Weather candidates: {_weather_samples}")
 
     return signals
 
