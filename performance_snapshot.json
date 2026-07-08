@@ -1,48 +1,15 @@
 {
-  "updated": "2026-07-08 13:34 UTC",
-  "bankroll": 909.0,
+  "updated": "2026-07-08 16:26 UTC",
+  "bankroll": 1000.0,
   "start_bankroll": 1000.0,
   "sniper": {
-    "n_open": 4,
+    "n_open": 0,
     "n_resolved": 0,
     "n_wins": 0,
     "win_rate": 0,
     "total_pnl": 0.0,
     "no_signal_streak": 7,
-    "open_trades": [
-      {
-        "question": "LoL: Zerolag Esports vs WLGaming Esports - Game 2 Winner",
-        "side": "YES",
-        "price": 0.16,
-        "confidence": 0.95,
-        "hours_to_expiry": 4.1,
-        "reason": "sports_verified"
-      },
-      {
-        "question": "LoL: Zerolag Esports vs WLGaming Esports - Game 1 Winner",
-        "side": "YES",
-        "price": 0.17,
-        "confidence": 0.95,
-        "hours_to_expiry": 4.1,
-        "reason": "sports_verified"
-      },
-      {
-        "question": "Valorant: FOKUS vs Pixel Lumina - Map 2 Winner",
-        "side": "YES",
-        "price": 0.69,
-        "confidence": 0.95,
-        "hours_to_expiry": 6.1,
-        "reason": "sports_verified"
-      },
-      {
-        "question": "Valorant: FOKUS vs Pixel Lumina - Map 1 Winner",
-        "side": "YES",
-        "price": 0.7,
-        "confidence": 0.95,
-        "hours_to_expiry": 6.1,
-        "reason": "sports_verified"
-      }
-    ],
+    "open_trades": [],
     "recent_resolved": []
   }
 }
