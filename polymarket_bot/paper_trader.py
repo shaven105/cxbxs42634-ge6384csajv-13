@@ -1,7 +1,8 @@
 """
 Paper trading engine — virtual portfolio backed by paper_trades.json.
 
-Virtual bankroll starts at $100 (reset June 2026 — v2 experiment).
+Virtual bankroll starts at $1,000 (raised from $100 in July 2026;
+target: +20% MoM = $200/month).
 Only S3 Sniper positions are recorded here now; S5 NicheSpecialist trades
 are legacy and will resolve naturally as markets close.
 """
@@ -16,7 +17,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path("paper_trades.json")
-STARTING_BANKROLL = 100.0
+STARTING_BANKROLL = 1000.0
 
 
 @dataclass
@@ -39,7 +40,21 @@ class PaperTrade:
 def load_state() -> dict:
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            state = json.loads(STATE_FILE.read_text())
+            # One-time capital raise: cached state predates the $1,000 bankroll.
+            # Additive top-up keeps any open-position accounting intact.
+            old_start = state.get("start_bankroll", STARTING_BANKROLL)
+            if old_start < STARTING_BANKROLL:
+                delta = STARTING_BANKROLL - old_start
+                state["start_bankroll"] = STARTING_BANKROLL
+                state["virtual_bankroll"] = round(
+                    state.get("virtual_bankroll", old_start) + delta, 4
+                )
+                logger.info(
+                    f"Bankroll migration: +${delta:.0f} → "
+                    f"start=${STARTING_BANKROLL:.0f}, current=${state['virtual_bankroll']:.2f}"
+                )
+            return state
         except Exception:
             pass
     return {
