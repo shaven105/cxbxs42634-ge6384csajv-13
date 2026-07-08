@@ -214,8 +214,6 @@ jobs:
         run: |
           cd polymarket_bot
           python run_paper_trade.py
-          sleep 120
-          python run_paper_trade.py
 
       - name: Save paper trade state
         if: always()
