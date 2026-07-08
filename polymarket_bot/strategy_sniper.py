@@ -216,6 +216,13 @@ CRYPTO_MAP: dict[str, tuple[str, str, re.Pattern]] = {
 }
 
 _PRICE_RE = re.compile(r'\$\s*([\d,]+(?:\.\d+)?)\s*([kKmM]?)')
+# Polymarket hourly strike-ladder markets have NO dollar sign:
+#   "Ethereum above 1,830 on July 8, 10AM ET?"
+# Anchor the number directly after the direction word so date digits
+# ("July 8") can never be mistaken for the threshold.
+_DIR_THRESH_RE = re.compile(
+    r'\b(above|over|below|under)\s+\$?\s*([\d,]+(?:\.\d+)?)\s*([kKmM]?)\b', re.I
+)
 _ABOVE_RE = re.compile(
     r'\b(?:above|over|exceed|reach(?:es)?|hit(?:s)?|surpass(?:es)?|break(?:s)?|cross(?:es)?|at or above)\b', re.I
 )
@@ -365,24 +372,42 @@ def fetch_crypto_prices() -> dict:
 
 
 def _parse_crypto_question(question: str) -> tuple[str, float, str] | None:
-    """Extract (symbol, threshold, direction) from a crypto price question, or None."""
+    """
+    Extract (symbol, threshold, direction) from a crypto price question, or None.
+
+    Handles both formats:
+      "Will Bitcoin reach $100k by July 31?"          ($-prefixed, direction elsewhere)
+      "Ethereum above 1,830 on July 8, 10AM ET?"      (no $, hourly strike ladder)
+    """
     for sym, (_, _, pattern) in CRYPTO_MAP.items():
-        if pattern.search(question):
-            m = _PRICE_RE.search(question)
-            if not m:
-                return None
-            num = float(m.group(1).replace(",", ""))
-            mult = m.group(2).upper()
-            if mult == "K":
+        if not pattern.search(question):
+            continue
+
+        def _to_num(raw: str, mult: str) -> float:
+            num = float(raw.replace(",", ""))
+            if mult.upper() == "K":
                 num *= 1_000
-            elif mult == "M":
+            elif mult.upper() == "M":
                 num *= 1_000_000
-            q = question.lower()
-            if _ABOVE_RE.search(q):
-                return sym, num, "above"
-            if _BELOW_RE.search(q):
-                return sym, num, "below"
+            return num
+
+        # Preferred: number anchored right after above/over/below/under
+        m = _DIR_THRESH_RE.search(question)
+        if m:
+            direction = "above" if m.group(1).lower() in ("above", "over") else "below"
+            return sym, _to_num(m.group(2), m.group(3)), direction
+
+        # Fallback: $-prefixed number anywhere + direction keyword anywhere
+        m = _PRICE_RE.search(question)
+        if not m:
             return None
+        num = _to_num(m.group(1), m.group(2))
+        q = question.lower()
+        if _ABOVE_RE.search(q):
+            return sym, num, "above"
+        if _BELOW_RE.search(q):
+            return sym, num, "below"
+        return None
     return None
 
 
@@ -786,6 +811,7 @@ def find_sniper_candidates(
     _n_no_bid = _n_no_date = _n_stale = 0
     _n_crypto_win = _n_crypto_skip = _n_weather_win = _n_weather_skip = 0
     _n_sports_win = _n_sports_skip = 0
+    _n_entry_reject = _n_kelly_reject = 0   # conf OK but market already priced it
     _crypto_samples: list[str] = []
     _weather_samples: list[str] = []
 
@@ -843,9 +869,15 @@ def find_sniper_candidates(
                         if confidence > 0:
                             kelly_cap  = SNIPE_KELLY_CAP_OVERDUE if is_overdue else SNIPE_KELLY_CAP_NEAR
                             entry_price = yes_ask if outcome == "YES" else round(1.0 - yes_bid, 4)
-                            if entry_price <= SNIPE_MAX_ENTRY:
+                            if entry_price > SNIPE_MAX_ENTRY:
+                                # Model agrees with market — priced too high to profit after fee
+                                _n_entry_reject += 1
+                            else:
                                 bet = _kelly_bet(confidence, entry_price, bankroll, kelly_cap)
-                                if bet > 0 and bankroll >= bet:
+                                if bet <= 0:
+                                    # conf passed threshold but Kelly says -EV at this ask
+                                    _n_kelly_reject += 1
+                                elif bankroll >= bet:
                                     reason = "overdue_crypto" if is_overdue else "near_expiry_crypto"
                                     signals.append(SniperTrade(
                                         date=now.strftime("%Y-%m-%d"),
@@ -940,12 +972,27 @@ def find_sniper_candidates(
         f"no_bid={_n_no_bid} no_date={_n_no_date} stale={_n_stale} | "
         f"crypto={_n_crypto_win}win/{_n_crypto_skip}skip "
         f"weather={_n_weather_win}win/{_n_weather_skip}skip "
-        f"sports={_n_sports_win}win/{_n_sports_skip}skip"
+        f"sports={_n_sports_win}win/{_n_sports_skip}skip | "
+        f"entry_reject={_n_entry_reject} kelly_reject={_n_kelly_reject}"
     )
     if _crypto_samples:
         logger.info(f"Crypto candidates: {_crypto_samples}")
     if _weather_samples:
         logger.info(f"Weather candidates: {_weather_samples}")
+
+    # Persist a rolling window of scan diagnostics so the daily reviewer
+    # can diagnose WHERE the pipeline loses candidates (loop engineering).
+    diag = sniper_state.setdefault("_diag", {"scans": []})
+    diag["scans"].append({
+        "ts": now.strftime("%Y-%m-%dT%H:%M"),
+        "markets": len(markets),
+        "no_bid": _n_no_bid,
+        "crypto_win": _n_crypto_win, "crypto_skip": _n_crypto_skip,
+        "weather_win": _n_weather_win, "weather_skip": _n_weather_skip,
+        "sports_win": _n_sports_win, "sports_skip": _n_sports_skip,
+        "entry_reject": _n_entry_reject, "kelly_reject": _n_kelly_reject,
+    })
+    diag["scans"] = diag["scans"][-200:]   # keep last ~200 scans (~1 day)
 
     return signals
 

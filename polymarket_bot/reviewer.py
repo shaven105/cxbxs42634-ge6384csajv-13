@@ -191,6 +191,156 @@ def update_no_signal_streak(sniper_state: dict, sniper_trades: list[dict]) -> in
     return streak
 
 
+# ── Deterministic loop engine (no API key required) ──────────────────────────
+#
+# Reads the rolling scan diagnostics written by find_sniper_candidates,
+# locates the bottleneck stage in the funnel, and proposes bounded param
+# changes.  This is the closed loop: observe → diagnose → act → verify
+# tomorrow.  Claude tiers (if API key present) run on top of this.
+
+def _current_sniper_params() -> dict:
+    """Read live values so reports never show stale hardcoded params."""
+    import strategy_sniper as ss
+    return {
+        "CRYPTO_MIN_CONFIDENCE":   ss.CRYPTO_MIN_CONFIDENCE,
+        "SNIPE_CRYPTO_MAX_HOURS":  ss.SNIPE_CRYPTO_MAX_HOURS,
+        "SNIPE_KELLY_CAP_NEAR":    ss.SNIPE_KELLY_CAP_NEAR,
+        "SNIPE_KELLY_CAP_OVERDUE": ss.SNIPE_KELLY_CAP_OVERDUE,
+        "SNIPE_MAX_ENTRY":         ss.SNIPE_MAX_ENTRY,
+        "WEATHER_MIN_CONFIDENCE":  ss.WEATHER_MIN_CONFIDENCE,
+    }
+
+
+def diagnose_pipeline(sniper_state: dict) -> tuple[str, dict, str]:
+    """
+    Aggregate the last day of scan diagnostics and identify the funnel bottleneck.
+
+    Funnel:  markets → parseable candidates → model-verified → price-acceptable → trade
+
+    Returns (bottleneck_key, param_changes, human_diagnosis).
+    param_changes are deterministic, bounded suggestions; empty dict = no
+    param can fix this bottleneck (needs code fix or is healthy).
+    """
+    scans = (sniper_state.get("_diag") or {}).get("scans") or []
+    if not scans:
+        return "no_data", {}, "尚無掃描診斷資料（新診斷版本尚未執行）"
+
+    tot = lambda k: sum(s.get(k, 0) for s in scans)
+    n_scans        = len(scans)
+    crypto_win     = tot("crypto_win")
+    crypto_skip    = tot("crypto_skip")
+    entry_reject   = tot("entry_reject")
+    kelly_reject   = tot("kelly_reject")
+    weather_all    = tot("weather_win") + tot("weather_skip")
+    sports_skip    = tot("sports_skip")
+    candidates     = crypto_win + crypto_skip + entry_reject + kelly_reject
+    params         = _current_sniper_params()
+
+    if crypto_win + tot("weather_win") + tot("sports_win") > 0:
+        return "healthy", {}, (
+            f"過去 {n_scans} 次掃描產生了訊號（crypto={crypto_win}），管線健康。"
+        )
+
+    if candidates == 0 and weather_all == 0:
+        return "parser", {}, (
+            f"過去 {n_scans} 次掃描 0 個可解析的 crypto/weather 候選 — "
+            "市場問題格式與 parser 不符，參數調整無效，需要程式碼修復。"
+        )
+
+    if entry_reject + kelly_reject >= max(3, candidates * 0.7):
+        # Model verified outcomes but the market had already priced them.
+        # No param fixes this honestly — raising SNIPE_MAX_ENTRY buys -EV trades.
+        return "market_efficient", {}, (
+            f"過去 {n_scans} 次掃描：模型驗證了 {entry_reject + kelly_reject} 個結果，"
+            f"但市場已定價（entry_reject={entry_reject}, kelly_reject={kelly_reject}）。"
+            "边缘只在價格快速移動時出現 — 保持掃描，等待波動。"
+        )
+
+    if crypto_skip >= max(3, candidates * 0.7):
+        # Candidates exist but confidence too low → relax threshold one step.
+        cur = params["CRYPTO_MIN_CONFIDENCE"]
+        lo, _ = _PARAM_BOUNDS["CRYPTO_MIN_CONFIDENCE"]
+        new = max(lo, round(cur - 0.03, 2))
+        changes = {"CRYPTO_MIN_CONFIDENCE": new} if new < cur else {}
+        return "confidence_gate", changes, (
+            f"過去 {n_scans} 次掃描：{crypto_skip} 個候選因信心不足被略過 "
+            f"(threshold={cur})。建議降至 {new}。"
+        )
+
+    return "low_flow", {}, (
+        f"過去 {n_scans} 次掃描候選數偏低（candidates={candidates}, "
+        f"weather={weather_all}, sports_skip={sports_skip}）— 等待更多市場資料。"
+    )
+
+
+def commit_loop_report(gh, report_md: str) -> bool:
+    """Commit loop_report.md to DEPLOY_BRANCH via GitHub API (upsert)."""
+    import base64 as b64
+    path = "loop_report.md"
+    sha = None
+    try:
+        old = gh("GET", f"/contents/{path}?ref={DEPLOY_BRANCH}")
+        sha = old.get("sha")
+    except Exception:
+        pass
+    body = {
+        "message": f"loop: daily report {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        "content": b64.b64encode(report_md.encode()).decode(),
+        "branch": DEPLOY_BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+    try:
+        gh("PUT", f"/contents/{path}", body)
+        return True
+    except Exception as exc:
+        logger.warning(f"loop_report commit failed: {exc}")
+        return False
+
+
+def build_loop_report(
+    streak: int, bottleneck: str, diagnosis: str,
+    action_taken: str, sniper_m, scans_summary: dict,
+) -> str:
+    """Markdown artifact for the repo — readable by the user AND by Claude Code."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    params = _current_sniper_params()
+    param_lines = "\n".join(f"| {k} | {v} |" for k, v in params.items())
+    return f"""# Daily Loop Report — {today}
+
+## Verdict
+- **Bottleneck**: `{bottleneck}`
+- **Diagnosis**: {diagnosis}
+- **Action taken**: {action_taken or "none"}
+- **No-signal streak**: {streak} cycles
+
+## Funnel (last {scans_summary.get('n_scans', 0)} scans)
+| Stage | Count |
+|---|---|
+| crypto candidates verified→traded | {scans_summary.get('crypto_win', 0)} |
+| crypto too-close-to-call | {scans_summary.get('crypto_skip', 0)} |
+| verified but market already priced | {scans_summary.get('entry_reject', 0)} |
+| verified but -EV at ask (Kelly=0) | {scans_summary.get('kelly_reject', 0)} |
+| weather candidates | {scans_summary.get('weather_all', 0)} |
+| sports non-matches | {scans_summary.get('sports_skip', 0)} |
+
+## Performance
+- Resolved: {sniper_m.n_resolved} | Win rate: {sniper_m.win_rate:.0f}% | P&L: {sniper_m.total_pnl:+.4f}
+
+## Current params
+| Param | Value |
+|---|---|
+{param_lines}
+
+## Notes for next Claude Code session
+- If bottleneck is `parser` for 2+ days: fetch live markets, compare question
+  formats against `_parse_crypto_question` / `_parse_weather_question`, extend parsers.
+- If `market_efficient` persists 7+ days: strategy edge may be gone at 5-min
+  cadence; consider CLOB websocket or accept lower frequency.
+- This file is auto-generated daily by reviewer.py (deterministic loop engine).
+"""
+
+
 # ── Sweeps ────────────────────────────────────────────────────────────────────
 
 def sniper_conf_sweep(trades: list[dict]) -> list[dict]:
@@ -670,20 +820,46 @@ def main() -> None:
     streak = update_no_signal_streak(sniper_state, sniper_trades)
     logger.info(f"No-signal streak: {streak} review cycles")
 
+    # ── Deterministic loop engine (always runs, no API key needed) ──────────
+    bottleneck, det_changes, det_diagnosis = diagnose_pipeline(sniper_state)
+    logger.info(f"Loop engine: bottleneck={bottleneck} | {det_diagnosis}")
+
+    scans = (sniper_state.get("_diag") or {}).get("scans") or []
+    _t = lambda k: sum(s.get(k, 0) for s in scans)
+    scans_summary = {
+        "n_scans": len(scans),
+        "crypto_win": _t("crypto_win"), "crypto_skip": _t("crypto_skip"),
+        "entry_reject": _t("entry_reject"), "kelly_reject": _t("kelly_reject"),
+        "weather_all": _t("weather_win") + _t("weather_skip"),
+        "sports_skip": _t("sports_skip"),
+    }
+
     # ── Determine action tier ───────────────────────────────────────────────
     bad_ev = (
         sniper_m.n_resolved >= BAD_EV_MIN_TRADES
         and sniper_m.win_rate < BAD_EV_WIN_RATE
     )
 
-    use_code_fix = (streak >= NO_SIGNAL_CODE_CYCLES) or bad_ev
+    use_code_fix = USE_CLAUDE and ((streak >= NO_SIGNAL_CODE_CYCLES) or bad_ev)
     use_aggressive_params = (streak >= NO_SIGNAL_RELAX_CYCLES) and not use_code_fix
 
     action_taken = ""
     observation  = ""
     pr_url       = ""
 
-    if use_code_fix:
+    if not USE_CLAUDE:
+        # No API key: the deterministic engine IS the reviewer.
+        observation = det_diagnosis
+        if det_changes and use_aggressive_params:
+            ok, pr_url = apply_param_changes(det_changes)
+            if ok:
+                change_desc = "、".join(f"{p}={v}" for p, v in det_changes.items())
+                action_taken = f"確定性調參：{change_desc}"
+        elif bottleneck == "parser" and streak >= NO_SIGNAL_CODE_CYCLES:
+            action_taken = "parser 瓶頸持續 — 已寫入 loop_report 供 Claude Code 修復"
+        logger.info(f"Deterministic action: {action_taken or 'observe only'}")
+
+    elif use_code_fix:
         logger.info("Tier 2: calling Claude Sonnet for code-level fix")
         fixes, diagnosis = claude_code_fix(streak, bad_ev)
         observation = diagnosis
@@ -711,13 +887,8 @@ def main() -> None:
             },
             "s5":   {"n_resolved": s5_m.n_resolved, "total_pnl": round(s5_m.total_pnl, 4)},
             "grid": {"n_resolved": grid_m.n_resolved, "total_pnl": round(grid_m.total_pnl, 4)},
-            "current_params": {
-                "CRYPTO_MIN_CONFIDENCE":   0.90,
-                "SNIPE_CRYPTO_MAX_HOURS":  6,
-                "SNIPE_KELLY_CAP_NEAR":    0.20,
-                "SNIPE_KELLY_CAP_OVERDUE": 0.35,
-                "SNIPE_MAX_ENTRY":         0.95,
-            },
+            "current_params": _current_sniper_params(),
+            "pipeline_diagnosis": {"bottleneck": bottleneck, "detail": det_diagnosis},
         }
         param_changes, observation = claude_param_tune(
             summary, aggressive=use_aggressive_params
@@ -736,6 +907,19 @@ def main() -> None:
     # ── Save updated sniper state (metadata) ────────────────────────────────
     from strategy_sniper import save_sniper_state
     save_sniper_state(sniper_state)
+
+    # ── Commit daily loop report to repo (closes the engineering loop) ──────
+    if GITHUB_TOKEN and GITHUB_REPO:
+        try:
+            gh, _ = _gh_client()
+            report_md = build_loop_report(
+                streak, bottleneck, det_diagnosis or observation,
+                action_taken, sniper_m, scans_summary,
+            )
+            if commit_loop_report(gh, report_md):
+                logger.info("loop_report.md committed")
+        except Exception as exc:
+            logger.warning(f"loop report step failed: {exc}")
 
     # ── Send Telegram ────────────────────────────────────────────────────────
     from telegram_reporter import send_message
