@@ -6,8 +6,10 @@ on:
     - cron: "0 15 * * *"
     # Daily strategy review: 08:30 Taiwan = 00:30 UTC
     - cron: "30 0 * * *"
-    # Intraday scan: every 5 min
-    - cron: "*/5 * * * *"
+    # Continuous scan: hourly job that loops internally (~2.5-min cadence when
+    # repo is public; single scan when private). Hourly crons fire far more
+    # reliably than */5 on the free tier.
+    - cron: "3 * * * *"
   workflow_dispatch:
     inputs:
       force_report:
@@ -166,19 +168,21 @@ jobs:
               print("Snapshot committed:", json.loads(r.read()).get("commit",{}).get("sha",""))
           EOF
 
-  # ── Job 2: Intraday scan every 5 min ─────────────────────────────────────────
+  # ── Job 2: Continuous scan (hourly job, internal ~2.5-min loop) ──────────────
+  # Visibility-adaptive quota guard:
+  #   repo PRIVATE → single scan per hourly tick (~720 billable min/month, safe)
+  #   repo PUBLIC  → 55-min internal loop, scan every ~2.5 min (unlimited free)
+  # Flip the repo to public and the next hourly run upgrades automatically.
   paper_scan:
-    name: "Intraday Paper Scan"
+    name: "Continuous Paper Scan"
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    # Skip 15:00 UTC (daily report) and 00:30 UTC (strategy review) slots
+    timeout-minutes: 58
     if: >
       github.event_name == 'schedule' &&
       !startsWith(github.event.schedule, '0 15') &&
       !startsWith(github.event.schedule, '30 0')
 
-    # Prevent concurrent runs: if a scan is still running when the next 5-min
-    # tick fires, queue at most one successor (GitHub drops older queued jobs).
+    # Never run two scan loops at once; queue at most one successor.
     concurrency:
       group: paper-scan
       cancel-in-progress: false
@@ -207,17 +211,32 @@ jobs:
           restore-keys: |
             paper-state-v2-
 
-      - name: Scan markets + alert on new signals
+      - name: Scan markets (loop when public, single when private)
         env:
           PAPER_ESTIMATOR: free
           SEND_DAILY_REPORT: "false"
-          MONTHLY_SCAN_LIMIT: ${{ vars.MONTHLY_SCAN_LIMIT || '1200' }}
+          MONTHLY_SCAN_LIMIT: "20000"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          PRIV=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}" \
+            | python3 -c "import sys,json; print(str(json.load(sys.stdin).get('private', True)).lower())")
+          echo "repo private=$PRIV"
           cd polymarket_bot
-          python run_paper_trade.py
+          if [ "$PRIV" = "true" ]; then
+            echo "Quota guard: single scan (make repo public for continuous mode)"
+            python run_paper_trade.py
+          else
+            echo "Continuous mode: scanning every ~2.5 min for 55 min"
+            END=$(( $(date +%s) + 3300 ))
+            while [ "$(date +%s)" -lt "$END" ]; do
+              python run_paper_trade.py || true
+              sleep 150
+            done
+          fi
 
       - name: Save paper trade state
         if: always()
