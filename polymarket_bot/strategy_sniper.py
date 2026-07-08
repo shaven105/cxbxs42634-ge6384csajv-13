@@ -516,17 +516,39 @@ def fetch_sports_results() -> list[dict]:
     return results
 
 
+# ESPN covers traditional sports only — esports questions can never be
+# legitimately verified by it, and short abbreviations ("LAG", "MIN") were
+# false-matching as substrings inside esports team names ("Zerolag", "Lumina").
+_ESPORTS_RE = re.compile(
+    r'\b(?:lol|league of legends|valorant|cs2|csgo|counter-?strike|dota|'
+    r'overwatch|esports?|starcraft|rocket league)\b|'
+    r'\b(?:map|game)\s+\d+\s+winner\b',
+    re.I
+)
+
+
+def _name_in(name: str, text: str) -> bool:
+    """Word-boundary match — 'lag' must NOT match inside 'Zerolag'."""
+    if len(name) < 3:
+        return False
+    return re.search(r'\b' + re.escape(name) + r'\b', text) is not None
+
+
 def _check_sports_question(
     question: str, results: list[dict]
 ) -> tuple[str, float] | None:
     """
     Match a Polymarket question to a completed game result.
-    Tries patterns in decreasing confidence order:
+    All team-name matching is word-bounded; esports markets are excluded.
+    Patterns in decreasing confidence order:
       1. "Will [TEAM] win/beat/defeat/advance?" → 0.99
       2. "Does/Did/Can [TEAM] win...?" → 0.97
-      3. Only one team mentioned + win context → 0.95
+      3. Only one team's FULL name mentioned + win context → 0.95
     """
     q = question.lower()
+    if _ESPORTS_RE.search(q):
+        return None
+
     for r in results:
         if not r.get("completed"):
             continue
@@ -535,8 +557,8 @@ def _check_sports_question(
         l_names = {r.get("loser","").lower(),  r.get("loser_short","").lower(),
                    r.get("loser_abbr","").lower()} - {""}
 
-        w_in_q = [n for n in w_names if n and n in q]
-        l_in_q = [n for n in l_names if n and n in q]
+        w_in_q = [n for n in w_names if _name_in(n, q)]
+        l_in_q = [n for n in l_names if _name_in(n, q)]
 
         if not w_in_q and not l_in_q:
             continue
@@ -545,28 +567,28 @@ def _check_sports_question(
         m = _WILL_WIN_RE.search(question)
         if m:
             subject = m.group(1).strip().lower()
-            if any(n in subject for n in w_names):
+            if any(_name_in(n, subject) for n in w_names):
                 return "YES", 0.99
-            if any(n in subject for n in l_names):
+            if any(_name_in(n, subject) for n in l_names):
                 return "NO", 0.99
 
         # Pattern 2: "Does/Did/Can [TEAM] win..."
         m2 = _WIN_VERB_RE.search(question)
         if m2:
             subject = m2.group(1).strip().lower()
-            if any(n in subject for n in w_names):
+            if any(_name_in(n, subject) for n in w_names):
                 return "YES", 0.97
-            if any(n in subject for n in l_names):
+            if any(_name_in(n, subject) for n in l_names):
                 return "NO", 0.97
 
-        # Pattern 3: only winner team mentioned + win context (not loss context)
-        if w_in_q and not l_in_q:
-            if _WIN_KEYWORDS_RE.search(q) and not _LOSE_KEYWORDS_RE.search(q):
+        # Pattern 3: only one team mentioned + win context.  FULL names only —
+        # abbreviations are too collision-prone for presence-based inference.
+        w_full = _name_in(r.get("winner","").lower(), q)
+        l_full = _name_in(r.get("loser","").lower(), q)
+        if _WIN_KEYWORDS_RE.search(q) and not _LOSE_KEYWORDS_RE.search(q):
+            if w_full and not l_in_q:
                 return "YES", 0.95
-
-        # Pattern 3b: only loser team mentioned + win context
-        if l_in_q and not w_in_q:
-            if _WIN_KEYWORDS_RE.search(q) and not _LOSE_KEYWORDS_RE.search(q):
+            if l_full and not w_in_q:
                 return "NO", 0.95
 
     return None

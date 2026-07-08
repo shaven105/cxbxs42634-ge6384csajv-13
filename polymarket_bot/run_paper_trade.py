@@ -165,6 +165,22 @@ def main() -> None:
     sniper_state = load_sniper_state()
     sniper_bankroll = [state["virtual_bankroll"]]
 
+    # Void esports false-positives (July 2026 substring-match bug): ESPN cannot
+    # verify LoL/Valorant markets, so any such open "sports_verified" trade is
+    # an error — remove it and refund the stake.  Idempotent.
+    import re as _re
+    _esports_void = _re.compile(
+        r'\b(?:lol|valorant|cs2|csgo|dota|esports?)\b|\b(?:map|game)\s+\d+\s+winner\b', _re.I)
+    _bad = [t for t in sniper_state["trades"]
+            if not t.get("resolved") and t.get("reason") == "sports_verified"
+            and _esports_void.search(t.get("question", ""))]
+    if _bad:
+        for t in _bad:
+            sniper_bankroll[0] = round(sniper_bankroll[0] + t.get("bet_usdc", 0), 4)
+            logger.info(f"VOIDED esports false-positive: {t.get('question','')[:60]} "
+                        f"(+${t.get('bet_usdc', 0):.2f} refunded)")
+        sniper_state["trades"] = [t for t in sniper_state["trades"] if t not in _bad]
+
     closed_snipers = check_sniper_resolutions(sniper_state, markets_by_id, sniper_bankroll)
     if closed_snipers:
         logger.info(f"Sniper: {len(closed_snipers)} positions resolved")
