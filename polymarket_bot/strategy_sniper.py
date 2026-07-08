@@ -56,8 +56,8 @@ logger = logging.getLogger(__name__)
 # ── Strategy parameters ────────────────────────────────────────────────────
 
 # Crypto: only enter if within this many hours of endDate OR already overdue
-# Beyond 6h, the crypto price can change enough to flip the outcome → skip
-SNIPE_CRYPTO_MAX_HOURS = 6
+# 12h window: daily markets close at midnight UTC, scanning at 8am still catches them
+SNIPE_CRYPTO_MAX_HOURS = 12
 
 # How many hours past endDate we still consider an overdue market valid
 SNIPE_OVERDUE_GRACE = 168     # 7 days
@@ -70,8 +70,8 @@ SNIPE_KELLY_CAP_OVERDUE = 0.35   # overdue market: outcome already determined
 SNIPE_KELLY_CAP_NEAR    = 0.20   # near-expiry (<6h): small time-price risk remains
 
 # Minimum bet and maximum concurrent positions
-SNIPE_MIN_BET       = 1.00   # $1 minimum (bankroll is now $100)
-SNIPE_MAX_POSITIONS = 5
+SNIPE_MIN_BET       = 0.50   # $0.50 minimum — allows more positions on $100 bankroll
+SNIPE_MAX_POSITIONS = 8
 
 # Minimum confidence (from volatility model) required to enter any trade
 CRYPTO_MIN_CONFIDENCE = 0.90
@@ -225,6 +225,13 @@ _BELOW_RE = re.compile(
 _WILL_WIN_RE = re.compile(
     r'\bwill\s+(?:the\s+)?(.{2,40}?)\s+(?:win|beat|defeat|advance)', re.I
 )
+# Broader fallback: "does/did/can the X win", "X to win", "X wins"
+_WIN_VERB_RE = re.compile(
+    r'\b(?:does|did|can|could)\s+(?:the\s+)?(.{2,50}?)\s+(?:win|beat|defeat|advance)',
+    re.I
+)
+_WIN_KEYWORDS_RE = re.compile(r'\b(?:win|wins|winner|beat|beats|victory|champion)\b', re.I)
+_LOSE_KEYWORDS_RE = re.compile(r'\b(?:lose|loses|loss|loser|fail|fails|fall\s+short)\b', re.I)
 
 
 # ── Dataclass ──────────────────────────────────────────────────────────────
@@ -488,9 +495,11 @@ def _check_sports_question(
     question: str, results: list[dict]
 ) -> tuple[str, float] | None:
     """
-    Match a Polymarket question to a completed ESPN game.
-    Uses conservative "Will [TEAM] win/beat/defeat/advance" pattern.
-    Returns (side, 0.99) or None.
+    Match a Polymarket question to a completed game result.
+    Tries patterns in decreasing confidence order:
+      1. "Will [TEAM] win/beat/defeat/advance?" → 0.99
+      2. "Does/Did/Can [TEAM] win...?" → 0.97
+      3. Only one team mentioned + win context → 0.95
     """
     q = question.lower()
     for r in results:
@@ -499,21 +508,96 @@ def _check_sports_question(
         w_names = {r.get("winner","").lower(), r.get("winner_short","").lower(),
                    r.get("winner_abbr","").lower()} - {""}
         l_names = {r.get("loser","").lower(),  r.get("loser_short","").lower(),
-                   r.get("loser_abbr","").lower()}  - {""}
+                   r.get("loser_abbr","").lower()} - {""}
 
-        if not (any(n in q for n in w_names) and any(n in q for n in l_names)):
+        w_in_q = [n for n in w_names if n and n in q]
+        l_in_q = [n for n in l_names if n and n in q]
+
+        if not w_in_q and not l_in_q:
             continue
 
+        # Pattern 1: "Will the [TEAM] win/beat/defeat/advance"
         m = _WILL_WIN_RE.search(question)
-        if not m:
-            continue
-        subject = m.group(1).strip().lower()
-        if any(n in subject for n in w_names):
-            return "YES", 0.99
-        if any(n in subject for n in l_names):
-            return "NO", 0.99
+        if m:
+            subject = m.group(1).strip().lower()
+            if any(n in subject for n in w_names):
+                return "YES", 0.99
+            if any(n in subject for n in l_names):
+                return "NO", 0.99
+
+        # Pattern 2: "Does/Did/Can [TEAM] win..."
+        m2 = _WIN_VERB_RE.search(question)
+        if m2:
+            subject = m2.group(1).strip().lower()
+            if any(n in subject for n in w_names):
+                return "YES", 0.97
+            if any(n in subject for n in l_names):
+                return "NO", 0.97
+
+        # Pattern 3: only winner team mentioned + win context (not loss context)
+        if w_in_q and not l_in_q:
+            if _WIN_KEYWORDS_RE.search(q) and not _LOSE_KEYWORDS_RE.search(q):
+                return "YES", 0.95
+
+        # Pattern 3b: only loser team mentioned + win context
+        if l_in_q and not w_in_q:
+            if _WIN_KEYWORDS_RE.search(q) and not _LOSE_KEYWORDS_RE.search(q):
+                return "NO", 0.95
 
     return None
+
+
+def fetch_mlb_results() -> list[dict]:
+    """
+    Fetch MLB game results from the official MLB Stats API (free, no key required).
+    More reliable team names than ESPN for MLB-specific markets.
+    """
+    now = datetime.now(timezone.utc)
+    results: list[dict] = []
+
+    for days_ago in range(3):
+        date_str = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        url = (
+            f"https://statsapi.mlb.com/api/v1/schedule"
+            f"?sportId=1&date={date_str}&gameType=R&hydrate=linescore,teams"
+        )
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "polymarket-bot/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+        except Exception as exc:
+            logger.debug(f"MLB API error for {date_str}: {exc}")
+            continue
+
+        for date_entry in (data.get("dates") or []):
+            for game in (date_entry.get("games") or []):
+                state = (game.get("status") or {}).get("detailedState", "")
+                if state != "Final":
+                    continue
+                teams = game.get("teams") or {}
+                home = teams.get("home") or {}
+                away = teams.get("away") or {}
+                h_score = home.get("score") or 0
+                a_score = away.get("score") or 0
+                if h_score == a_score:
+                    continue
+                if h_score > a_score:
+                    w_team, l_team = home.get("team") or {}, away.get("team") or {}
+                else:
+                    w_team, l_team = away.get("team") or {}, home.get("team") or {}
+                results.append({
+                    "league":       "mlb",
+                    "winner":       w_team.get("name", ""),
+                    "winner_short": w_team.get("teamName", ""),
+                    "winner_abbr":  w_team.get("abbreviation", ""),
+                    "loser":        l_team.get("name", ""),
+                    "loser_short":  l_team.get("teamName", ""),
+                    "loser_abbr":   l_team.get("abbreviation", ""),
+                    "completed":    True,
+                })
+
+    logger.info(f"MLB API: {len(results)} completed games")
+    return results
 
 
 # ── Weather forecast fetching & verification ──────────────────────────────

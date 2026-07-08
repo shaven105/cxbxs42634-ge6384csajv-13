@@ -37,7 +37,7 @@ from strategy_grid import load_grid_state, save_grid_state, check_grid_updates
 from strategy_sniper import (
     load_sniper_state, save_sniper_state,
     find_sniper_candidates, record_sniper_trade, check_sniper_resolutions,
-    fetch_crypto_prices, fetch_sports_results,
+    fetch_crypto_prices, fetch_sports_results, fetch_mlb_results,
 )
 from telegram_reporter import send_daily_report, send_signal_alert
 
@@ -171,9 +171,13 @@ def main() -> None:
 
     crypto_prices  = fetch_crypto_prices()
     sports_results = fetch_sports_results()
+    mlb_results    = fetch_mlb_results()
+    # Merge MLB results (more reliable team names) with ESPN results
+    all_sports = sports_results + mlb_results
 
     if crypto_prices:
         logger.info(f"Crypto prices fetched: {list(crypto_prices.keys())}")
+    logger.info(f"Sports: {len(sports_results)} ESPN + {len(mlb_results)} MLB = {len(all_sports)} total")
 
     new_sniper_trades = []
     for signal in find_sniper_candidates(
@@ -181,7 +185,7 @@ def main() -> None:
         bankroll=sniper_bankroll[0],
         sniper_state=sniper_state,
         crypto_prices=crypto_prices,
-        sports_results=sports_results,
+        sports_results=all_sports,
     ):
         if sniper_bankroll[0] < signal.bet_usdc:
             continue
