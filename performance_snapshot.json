@@ -1,15 +1,24 @@
 {
-  "updated": "2026-07-08 16:26 UTC",
-  "bankroll": 1000.0,
+  "updated": "2026-07-09 17:16 UTC",
+  "bankroll": 800.0,
   "start_bankroll": 1000.0,
   "sniper": {
-    "n_open": 0,
+    "n_open": 1,
     "n_resolved": 0,
     "n_wins": 0,
     "win_rate": 0,
     "total_pnl": 0.0,
-    "no_signal_streak": 7,
-    "open_trades": [],
+    "no_signal_streak": 8,
+    "open_trades": [
+      {
+        "question": "Ethereum above 1,730 on July 9, 9AM ET?",
+        "side": "YES",
+        "price": 0.93,
+        "confidence": 0.9600970423970453,
+        "hours_to_expiry": 0.1,
+        "reason": "near_expiry_crypto"
+      }
+    ],
     "recent_resolved": []
   }
 }
