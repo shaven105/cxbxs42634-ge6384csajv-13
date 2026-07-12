@@ -1,20 +1,20 @@
-# Daily Loop Report — 2026-07-11
+# Daily Loop Report — 2026-07-12
 
 ## Verdict
-- **Bottleneck**: `market_efficient`
-- **Diagnosis**: 過去 200 次掃描：模型驗證了 3980 個結果，但市場已定價（entry_reject=3979, kelly_reject=1）。边缘只在價格快速移動時出現 — 保持掃描，等待波動。
+- **Bottleneck**: `healthy`
+- **Diagnosis**: 過去 200 次掃描產生了訊號（crypto=1），管線健康。
 - **Action taken**: none
-- **No-signal streak**: 10 cycles
+- **No-signal streak**: 0 cycles
 
 ## Funnel (last 200 scans)
 | Stage | Count |
 |---|---|
-| crypto candidates verified→traded | 0 |
-| crypto too-close-to-call | 1061 |
-| verified but market already priced | 3979 |
-| verified but -EV at ask (Kelly=0) | 1 |
+| crypto candidates verified→traded | 1 |
+| crypto too-close-to-call | 362 |
+| verified but market already priced | 1909 |
+| verified but -EV at ask (Kelly=0) | 0 |
 | weather candidates | 0 |
-| sports non-matches | 95812 |
+| sports non-matches | 94783 |
 
 ## Performance
 - Resolved: 0 | Win rate: 0% | P&L: +0.0000
