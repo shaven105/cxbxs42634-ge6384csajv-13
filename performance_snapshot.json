@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-11 15:48 UTC",
+  "updated": "2026-07-12 15:53 UTC",
   "bankroll": 640.0,
   "start_bankroll": 1000.0,
   "sniper": {
@@ -22,7 +22,7 @@
         "question": "Ethereum above 1,820 on July 11, 12PM ET?",
         "side": "NO",
         "price": 0.83,
-        "confidence": 0.92890301910512,
+        "confidence": 0.9408206966078891,
         "hours_to_expiry": 0.2,
         "reason": "near_expiry_crypto"
       }
