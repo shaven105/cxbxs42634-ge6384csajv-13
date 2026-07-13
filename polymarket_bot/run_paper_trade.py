@@ -119,6 +119,15 @@ def main() -> None:
     mode = "daily report" if SEND_DAILY_REPORT else "intraday scan"
     logger.info(f"=== Paper trading run [{mode}] ===")
 
+    # Answer any pending Telegram commands (/summary etc.).  The scan loop's
+    # dedicated listener handles the fast path; this catches commands sent
+    # while no listener was running (private-repo mode, daily jobs).
+    try:
+        from telegram_commands import poll_once
+        poll_once()
+    except Exception as exc:
+        logger.warning(f"telegram command poll failed: {exc}")
+
     state = load_state()
 
     # Monthly budget gate — intraday scans only

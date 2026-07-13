@@ -234,7 +234,9 @@ jobs:
             END=$(( $(date +%s) + 3300 ))
             while [ "$(date +%s)" -lt "$END" ]; do
               python run_paper_trade.py || true
-              sleep 150
+              # The inter-scan gap doubles as a Telegram command listener,
+              # so /summary gets answered within seconds.
+              python telegram_commands.py --listen 150 || sleep 150
             done
           fi
 
