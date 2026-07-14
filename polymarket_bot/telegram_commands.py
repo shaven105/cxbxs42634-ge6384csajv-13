@@ -236,11 +236,34 @@ def _handle_text(text: str) -> str | None:
     return None
 
 
+_webhook_checked = False
+
+
+def _warn_if_webhook_set() -> None:
+    """A configured webhook silently starves getUpdates — surface that."""
+    global _webhook_checked
+    if _webhook_checked:
+        return
+    _webhook_checked = True
+    try:
+        with urllib.request.urlopen(f"{_get_api_base()}/getWebhookInfo", timeout=10) as r:
+            info = json.loads(r.read()).get("result", {})
+        if info.get("url"):
+            logger.warning(
+                "Telegram webhook is set — getUpdates will never see messages! "
+                "Clear it with deleteWebhook."
+            )
+    except Exception:
+        pass
+
+
 def poll_once(timeout: int = 0) -> int:
     """One getUpdates pass; answer commands from the owner chat. Returns #handled."""
+    _warn_if_webhook_set()
     updates = _get_updates(timeout=timeout)
     if not updates:
         return 0
+    logger.info(f"getUpdates: {len(updates)} pending update(s)")
 
     my_chat = str(_get_chat_id())
     handled = 0
@@ -248,7 +271,13 @@ def poll_once(timeout: int = 0) -> int:
         msg = u.get("message") or {}
         chat_id = str((msg.get("chat") or {}).get("id", ""))
         text = msg.get("text", "")
-        if chat_id != my_chat or not text.startswith("/"):
+        if chat_id != my_chat:
+            # Log a masked prefix only — enough to diagnose a chat-id
+            # mismatch without exposing ids in public logs.
+            logger.info(f"skip update from other chat ({chat_id[:4]}…, text={text[:20]!r})")
+            continue
+        if not text.startswith("/"):
+            logger.info(f"skip non-command message: {text[:30]!r}")
             continue
         logger.info(f"Telegram command: {text}")
         reply = _handle_text(text)
