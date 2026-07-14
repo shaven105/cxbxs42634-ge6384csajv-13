@@ -1,9 +1,9 @@
 {
-  "updated": "2026-07-13 17:09 UTC",
-  "bankroll": 416.0,
+  "updated": "2026-07-14 14:31 UTC",
+  "bankroll": 235.24,
   "start_bankroll": 1000.0,
   "sniper": {
-    "n_open": 3,
+    "n_open": 5,
     "n_resolved": 0,
     "n_wins": 0,
     "win_rate": 0,
@@ -33,6 +33,22 @@
         "confidence": 0.9064476894367379,
         "hours_to_expiry": -0.1,
         "reason": "overdue_crypto"
+      },
+      {
+        "question": "Bitcoin above 62,600 on July 14, 3AM ET?",
+        "side": "NO",
+        "price": 0.001,
+        "confidence": 0.9301088237968588,
+        "hours_to_expiry": -0.2,
+        "reason": "overdue_crypto"
+      },
+      {
+        "question": "Ethereum above 1,800 on July 14, 8AM ET?",
+        "side": "NO",
+        "price": 0.88,
+        "confidence": 0.9112110300375722,
+        "hours_to_expiry": 0.0,
+        "reason": "near_expiry_crypto"
       }
     ],
     "recent_resolved": []
