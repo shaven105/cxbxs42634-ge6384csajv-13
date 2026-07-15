@@ -1,20 +1,20 @@
-# Daily Loop Report — 2026-07-14
+# Daily Loop Report — 2026-07-15
 
 ## Verdict
 - **Bottleneck**: `healthy`
-- **Diagnosis**: 過去 200 次掃描產生了訊號（crypto=1），管線健康。
+- **Diagnosis**: 過去 200 次掃描產生了訊號（crypto=3），管線健康。
 - **Action taken**: none
-- **No-signal streak**: 1 cycles
+- **No-signal streak**: 0 cycles
 
 ## Funnel (last 200 scans)
 | Stage | Count |
 |---|---|
-| crypto candidates verified→traded | 1 |
-| crypto too-close-to-call | 727 |
-| verified but market already priced | 2974 |
+| crypto candidates verified→traded | 3 |
+| crypto too-close-to-call | 912 |
+| verified but market already priced | 3764 |
 | verified but -EV at ask (Kelly=0) | 0 |
 | weather candidates | 0 |
-| sports non-matches | 97770 |
+| sports non-matches | 117659 |
 
 ## Performance
 - Resolved: 0 | Win rate: 0% | P&L: +0.0000
