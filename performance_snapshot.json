@@ -1,5 +1,5 @@
 {
-  "updated": "2026-08-05 16:27 UTC",
+  "updated": "2026-08-07 15:49 UTC",
   "bankroll": 89.8,
   "start_bankroll": 1000.0,
   "sniper": {
@@ -8,7 +8,7 @@
     "n_wins": 0,
     "win_rate": 0,
     "total_pnl": 0.0,
-    "no_signal_streak": 8,
+    "no_signal_streak": 9,
     "open_trades": [
       {
         "question": "Ethereum above 1,730 on July 9, 9AM ET?",
