@@ -2,8 +2,8 @@ name: StarLux Fare Tracker
 
 on:
   schedule:
-    # Daily 09:00 Taipei time = 01:00 UTC
-    - cron: "0 1 * * *"
+    # Daily 00:00 Taipei time = 16:00 UTC (previous day)
+    - cron: "0 16 * * *"
   workflow_dispatch: {}
 
 env:
