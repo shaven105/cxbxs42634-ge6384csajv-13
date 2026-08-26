@@ -1,0 +1,45 @@
+name: StarLux Fare Tracker
+
+on:
+  schedule:
+    # Daily 09:00 Taipei time = 01:00 UTC
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}
+
+env:
+  DEPLOY_BRANCH: claude/starlux-price-tracking-dec-ft877p
+
+jobs:
+  track_fare:
+    name: "Fetch fare + notify Telegram"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch today's fare reading
+        run: python starlux_price_tracker/track_fare.py
+
+      - name: Send Telegram update
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python starlux_price_tracker/notify_telegram.py
+
+      - name: Commit updated price history
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add starlux_price_tracker/data/price_history.csv
+          git diff --cached --quiet || git commit -m "data: starlux fare reading $(date -u +%F)"
+          git push origin HEAD:${{ env.DEPLOY_BRANCH }}
