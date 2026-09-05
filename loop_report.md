@@ -1,10 +1,10 @@
-# Daily Loop Report — 2026-09-04
+# Daily Loop Report — 2026-09-05
 
 ## Verdict
 - **Bottleneck**: `parser`
 - **Diagnosis**: 過去 200 次掃描 0 個可解析的 crypto/weather 候選 — 市場問題格式與 parser 不符，參數調整無效，需要程式碼修復。
 - **Action taken**: parser 瓶頸持續 — 已寫入 loop_report 供 Claude Code 修復
-- **No-signal streak**: 14 cycles
+- **No-signal streak**: 15 cycles
 
 ## Funnel (last 200 scans)
 | Stage | Count |
